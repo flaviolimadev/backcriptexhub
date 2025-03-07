@@ -9,8 +9,12 @@ import { Exage } from '../exages/exage.entity';
 import { Prcing  } from '../precing/entities/prcing.entity'; // 🔥 Importando a entidade Precing
 import { PrcingHistoryService } from '../precingHistory/prcingHistory.service';
 import { PrcingHistory } from '../precingHistory/prcingHistory.entity'; // 🔥 Importando a entidade
+import { HttpsProxyAgent } from 'https-proxy-agent'; // 🔥 Suporte a proxy
 
 dotenv.config();
+
+// 🔥 Configuração do Proxy
+const proxyAgent = new HttpsProxyAgent(`http://${process.env.PROXY_USERNAME}:${process.env.PROXY_PASSWORD}@${process.env.PROXY_HOST}:${process.env.PROXY_PORT}`);
 
 interface BitgetTickerResponse {
   code: string;
@@ -459,19 +463,31 @@ async getMexcFuturesPrices(): Promise<any[]> {
     }
   }
 
-  async getBinanceFuturesPrices(): Promise<BinancePrice[]> {
+
+
+
+
+
+  async getBinanceFuturesPrices(): Promise<any[]> {
     try {
-        this.logger.log('🔍 Buscando preços da Binance (Futuros USDT-M)...');
+        this.logger.log('🔍 Buscando preços da Binance (Futuros USDT-M) usando proxy...');
+
+        // 🔥 Configuração do Axios para utilizar Proxy
+        // 🔥 Configuração do Axios para utilizar Proxy
+        const axiosConfig = {
+            httpsAgent: proxyAgent, // ✅ Proxy aplicado
+            timeout: 15000, // ✅ Timeout de 15s para evitar bloqueios
+        };
 
         // 🔥 Buscar os ativos cadastrados no banco de dados
         const ativos = await this.ativosRepository.find({ where: { status: 1 } });
 
         // 🔥 Buscar os preços dos ativos futuros na Binance
-        const response = await axios.get(this.binanceFuturesAPI);
+        const response = await axios.get(this.binanceFuturesAPI, axiosConfig);
         const pricesData = Array.isArray(response.data) ? response.data : [];
 
         // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-        const contractsResponse = await axios.get(this.binanceContractsAPI);
+        const contractsResponse = await axios.get(this.binanceContractsAPI, axiosConfig);
         const contractsData = (contractsResponse.data as any).symbols || [];
 
         // 🔥 Criar um tipo explícito para contratos
@@ -493,7 +509,7 @@ async getMexcFuturesPrices(): Promise<any[]> {
             ])
         );
 
-        const processedData: BinancePrice[] = [];
+        const processedData: any[] = [];
         const currentTimestamp = new Date();
         const currentMinute = currentTimestamp.getMinutes();
 
@@ -585,7 +601,7 @@ async getMexcFuturesPrices(): Promise<any[]> {
 
         return processedData;
     } catch (error) {
-        this.logger.error('❌ Erro ao buscar preços da Binance:', error.response?.data || error.message);
+        this.logger.error('❌ Erro ao buscar preços da Binance:', error.message);
         return [];
     }
   }
