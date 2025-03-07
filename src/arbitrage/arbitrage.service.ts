@@ -698,9 +698,9 @@ export class ArbitrageService {
                 const precoVenda = Number(venda.precing);
                 const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
 
-                // 🔥 Tempo de atualização em minutos
-                const atualizado = Math.floor((Date.now() - new Date(compra.updated_at).getTime()) / 60000);
-
+                // 🔥 Tempo de atualização em segundos
+                const atualizado = Math.floor((Date.now() - new Date(compra.updated_at).getTime()) / 1000);
+                
                 oportunidades.push({
                     Moeda: ativo,
                     Compra: compra.exage.name,
@@ -708,7 +708,7 @@ export class ArbitrageService {
                     Precing_Compra: precoCompra.toFixed(4),
                     Precing_Venda: precoVenda.toFixed(4),
                     Spread: spread.toFixed(2) + '%',
-                    Atualizado: atualizado + ' min atrás',
+                    Atualizado: atualizado + ' segundos atrás',
                 });
             }
         }
