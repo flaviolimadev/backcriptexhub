@@ -10,6 +10,7 @@ import { Prcing  } from '../precing/entities/prcing.entity'; // 🔥 Importando 
 import { PrcingHistoryService } from '../precingHistory/prcingHistory.service';
 import { PrcingHistory } from '../precingHistory/prcingHistory.entity'; // 🔥 Importando a entidade
 import { HttpsProxyAgent } from 'https-proxy-agent'; // 🔥 Suporte a proxy
+import { Cron } from '@nestjs/schedule';
 
 dotenv.config();
 
@@ -157,43 +158,44 @@ export class ArbitrageService {
         await this.prcingHistoryService.savePriceHistory(ativo, exage, precing);
     }
 
-  async verificarOuAdicionarAtivo(name: string) {
-    let ativo = await this.ativosRepository.findOne({ where: { name } });
+    async verificarOuAdicionarAtivo(name: string) {
+        let ativo = await this.ativosRepository.findOne({ where: { name } });
 
-    if (!ativo) {
-      ativo = this.ativosRepository.create({ name, status: 1 });
-      await this.ativosRepository.save(ativo);
-      console.log(`✅ Ativo ${name} adicionado ao banco de dados.`);
-    } else {
-      console.log(`🔎 Ativo ${name} já cadastrado.`);
+        if (!ativo) {
+        ativo = this.ativosRepository.create({ name, status: 1 });
+        await this.ativosRepository.save(ativo);
+        console.log(`✅ Ativo ${name} adicionado ao banco de dados.`);
+        } else {
+        console.log(`🔎 Ativo ${name} já cadastrado.`);
+        }
     }
-  }
 
-  async getSpotSpotArbitrage(): Promise<any[]> {
+    async getSpotSpotArbitrage(): Promise<any[]> {
     // 🔥 Simulação de dados de arbitragem Spot-Spot
     const opportunities = [
-      {
+        {
         exchange_buy: "Binance",
         exchange_sell: "Kraken",
         pair: "BTC/USDT",
         buy_price: 50000,
         sell_price: 50500,
         spread: "1.00%",
-      },
-      {
+        },
+        {
         exchange_buy: "Coinbase",
         exchange_sell: "KuCoin",
         pair: "ETH/USDT",
         buy_price: 3500,
         sell_price: 3550,
         spread: "1.42%",
-      },
+        },
     ];
 
     return opportunities;
-  }
+    }
 
-  async getGateIoFuturesPrices(): Promise<any[]> {
+    @Cron('*/15 * * * * *')  // Executa a cada 20 segundos
+    async getGateIoFuturesPrices(): Promise<any[]> {
     try {
         // 🔥 Buscar os ativos cadastrados no banco de dados
         const ativos = await this.ativosRepository.find({ where: { status: 1 } });
@@ -309,58 +311,230 @@ export class ArbitrageService {
         console.error('❌ Erro ao buscar preços futuros da Gate.io:', error.message);
         return [];
     } 
-  }
+    }
 
+    @Cron('*/15 * * * * *')  // Executa a cada 20 segundos
+    async getMexcFuturesPrices(): Promise<any[]> {
+        try {
+            // 🔥 Buscar os ativos cadastrados no banco de dados
+            const ativos = await this.ativosRepository.find({ where: { status: 1 } });
 
-async getMexcFuturesPrices(): Promise<any[]> {
+            // 🔥 Converter os nomes dos ativos para o formato esperado pela API (BTCUSDT → BTC_USDT)
+            const coinsOfInterest = ativos.map(ativo => ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'));
+
+            // 🔥 Buscar os preços dos ativos futuros na MEXC
+            const response = await axios.get<{ data: { symbol: string; lastPrice: string; highPrice24h: string; lowPrice24h: string; fundingRate: string; priceChangePercent: string; }[] }>(this.mexcAPI);
+            const pricesData = response.data.data || [];
+
+            // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
+            const contractsResponse = await axios.get<{ data: { symbol: string; minVol: string; maxVol: string; minAmount: string; maxAmount: string; }[] }>(this.mexcContractsAPI);
+            const contractsData = contractsResponse.data.data || [];
+
+            // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
+            const contractMap = new Map(contractsData.map(contract => [
+                contract.symbol, 
+                {
+                    min_size: contract.minVol || "N/A",  // Volume mínimo em moeda
+                    max_size: contract.maxVol || "N/A",  // Volume máximo em moeda
+                    min_notional: contract.minAmount || "N/A", // Volume mínimo em USDT
+                    max_notional: contract.maxAmount || "N/A", // Volume máximo em USDT
+                }
+            ]));
+
+            // 🔥 Iterar pelos ativos e atualizar/inserir no banco de dados
+            const futuresPrices = await Promise.all(pricesData
+                .filter(item => coinsOfInterest.includes(item.symbol))
+                .map(async (item) => {
+                    const contractInfo = contractMap.get(item.symbol) || {
+                        min_size: "N/A",
+                        max_size: "N/A",
+                        min_notional: "N/A",
+                        max_notional: "N/A",
+                    };
+
+                    // 🔥 Buscar os registros correspondentes no banco
+                    const ativo = await this.ativosRepository.findOne({ where: { name: item.symbol.replace('_', '') } });
+                    const exage = await this.exageRepository.findOne({ where: { id: 3 } }); // 🔥 MEXC ID = 3
+
+                    if (!ativo || !exage) return null;
+
+                    // 🔥 Evita NaN no volume
+                    const volumValue = parseFloat(contractInfo.max_notional);
+                    const validVolum = isNaN(volumValue) ? 0 : volumValue;
+                    const currentTimestamp = new Date();
+                    const currentMinute = currentTimestamp.getMinutes();
+
+                    // 🔥 Verifica se já existe um registro na tabela `precings`
+                    let existingPrcing = await this.prcingRepository.findOne({
+                        where: { ativo: { id: ativo.id }, exage: { id: exage.id } }
+                    });
+
+                    if (existingPrcing) {
+                        // 🔥 Atualiza os dados da linha existente para evitar duplicação
+                        existingPrcing.precing = parseFloat(item.lastPrice);
+                        existingPrcing.volum = validVolum;
+                        existingPrcing.updated_at = currentTimestamp;
+                        await this.prcingRepository.save(existingPrcing);
+                    } else {
+                        // 🔥 Cria um novo registro caso não exista
+                        const newPrcing = this.prcingRepository.create({
+                            ativo: ativo,
+                            exage: exage,
+                            precing: parseFloat(item.lastPrice),
+                            type: 1, // Mercado futuro
+                            volum: validVolum,
+                            status: 1,
+                            created_at: currentTimestamp,
+                            updated_at: currentTimestamp,
+                        });
+                        await this.prcingRepository.save(newPrcing);
+                    }
+
+                    // 🔥 Verifica se já existe um registro no histórico para esse ativo na MEXC no mesmo minuto
+                    let existingHistory = await this.prcingHistoryRepository.findOne({
+                        where: { 
+                            ativo: { id: ativo.id }, 
+                            exage: { id: exage.id },
+                        },
+                        order: { timestamp: "DESC" } // 🔥 Pega o registro mais recente
+                    });
+
+                    if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== currentMinute) {
+                        // 🔥 Cria um novo registro no histórico apenas se não houver um registro do mesmo minuto
+                        const newHistory = this.prcingHistoryRepository.create({
+                            ativo: ativo,
+                            exage: exage,
+                            precing: parseFloat(item.lastPrice),
+                            timestamp: currentTimestamp,
+                        });
+                        await this.prcingHistoryRepository.save(newHistory);
+                    }
+
+                    return {
+                        pair: item.symbol.replace('_', '/'),
+                        last_price: item.lastPrice,
+                        highest_price_24h: item.highPrice24h,
+                        lowest_price_24h: item.lowPrice24h,
+                        funding_rate: item.fundingRate,
+                        change_24h: item.priceChangePercent,
+                        min_size: contractInfo.min_size,
+                        max_size: contractInfo.max_size,
+                        min_notional: contractInfo.min_notional,
+                        max_notional: contractInfo.max_notional,
+                    };
+                })
+            );
+
+            return futuresPrices.filter(price => price !== null);
+        } catch (error) {
+            console.error('❌ Erro ao buscar preços futuros da MEXC:', error.message);
+            return [];
+        }
+    }
+
+    async getBitgetFuturesPrices(): Promise<BitgetTicker[]> {
+    const timestamp = String(Date.now());
+    const productType = 'umcbl'; // 🔥 Definindo explicitamente o tipo de mercado
+
     try {
-        // 🔥 Buscar os ativos cadastrados no banco de dados
-        const ativos = await this.ativosRepository.find({ where: { status: 1 } });
+        console.log(`🔍 Buscando dados da Bitget com productType=${productType}...`);
 
-        // 🔥 Converter os nomes dos ativos para o formato esperado pela API (BTCUSDT → BTC_USDT)
-        const coinsOfInterest = ativos.map(ativo => ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'));
+        const response = await axios.get<BitgetApiResponse<BitgetTicker[]>>(this.bitgetTickersAPI, {
+        params: { productType }, // 🔥 Garantindo que 'productType' não está vazio
+        headers: {
+            'ACCESS-KEY': BITGET_API_KEY!,
+            'ACCESS-SIGN': this.generateSignature(timestamp),
+            'ACCESS-TIMESTAMP': timestamp,
+            'ACCESS-PASSPHRASE': BITGET_PASSPHRASE!,
+            'Content-Type': 'application/json',
+        },
+        });
 
-        // 🔥 Buscar os preços dos ativos futuros na MEXC
-        const response = await axios.get<{ data: { symbol: string; lastPrice: string; highPrice24h: string; lowPrice24h: string; fundingRate: string; priceChangePercent: string; }[] }>(this.mexcAPI);
-        const pricesData = response.data.data || [];
+        if (response.data.code === '00000') {
+        console.log(`✅ Sucesso ao buscar dados da Bitget.`);
+        return response.data.data;
+        }
 
-        // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-        const contractsResponse = await axios.get<{ data: { symbol: string; minVol: string; maxVol: string; minAmount: string; maxAmount: string; }[] }>(this.mexcContractsAPI);
-        const contractsData = contractsResponse.data.data || [];
+        console.warn(`⚠️ Erro ao buscar dados:`, response.data.msg);
+        return [];
+    } catch (error) {
+        console.error(`❌ Erro ao buscar dados da Bitget:`, error.response?.data || error.message);
+        return [];
+    }
+    }
 
-        // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-        const contractMap = new Map(contractsData.map(contract => [
-            contract.symbol, 
-            {
-                min_size: contract.minVol || "N/A",  // Volume mínimo em moeda
-                max_size: contract.maxVol || "N/A",  // Volume máximo em moeda
-                min_notional: contract.minAmount || "N/A", // Volume mínimo em USDT
-                max_notional: contract.maxAmount || "N/A", // Volume máximo em USDT
+    @Cron('*/60 * * * * *')  // Executa a cada 20 segundos
+    async getBinanceFuturesPrices(): Promise<any[]> {
+        try {
+            this.logger.log('🔍 Buscando preços da Binance (Futuros USDT-M) usando proxy...');
+
+            // 🔥 Configuração do Axios para utilizar Proxy
+            // 🔥 Configuração do Axios para utilizar Proxy
+            const axiosConfig = {
+                httpsAgent: proxyAgent, // ✅ Proxy aplicado
+                timeout: 15000, // ✅ Timeout de 15s para evitar bloqueios
+            };
+
+            // 🔥 Buscar os ativos cadastrados no banco de dados
+            const ativos = await this.ativosRepository.find({ where: { status: 1 } });
+
+            // 🔥 Buscar os preços dos ativos futuros na Binance
+            const response = await axios.get(this.binanceFuturesAPI, axiosConfig);
+            const pricesData = Array.isArray(response.data) ? response.data : [];
+
+            // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
+            const contractsResponse = await axios.get(this.binanceContractsAPI, axiosConfig);
+            const contractsData = (contractsResponse.data as any).symbols || [];
+
+            // 🔥 Criar um tipo explícito para contratos
+            interface BinanceContractInfo {
+                min_size: string;
+                max_size: string;
+                min_notional: string;
             }
-        ]));
 
-        // 🔥 Iterar pelos ativos e atualizar/inserir no banco de dados
-        const futuresPrices = await Promise.all(pricesData
-            .filter(item => coinsOfInterest.includes(item.symbol))
-            .map(async (item) => {
-                const contractInfo = contractMap.get(item.symbol) || {
+            // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
+            const contractMap = new Map<string, BinanceContractInfo>(
+                contractsData.map(contract => [
+                    contract.symbol,
+                    {
+                        min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
+                        max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
+                        min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
+                    }
+                ])
+            );
+
+            const processedData: any[] = [];
+            const currentTimestamp = new Date();
+            const currentMinute = currentTimestamp.getMinutes();
+
+            for (const item of pricesData) {
+                const contractInfo: BinanceContractInfo = contractMap.get(item.symbol) || {
                     min_size: "N/A",
                     max_size: "N/A",
                     min_notional: "N/A",
-                    max_notional: "N/A",
                 };
 
-                // 🔥 Buscar os registros correspondentes no banco
-                const ativo = await this.ativosRepository.findOne({ where: { name: item.symbol.replace('_', '') } });
-                const exage = await this.exageRepository.findOne({ where: { id: 3 } }); // 🔥 MEXC ID = 3
+                // 🔥 Buscar o ativo correspondente no banco de dados
+                let ativo = await this.ativosRepository.findOne({ where: { name: item.symbol } });
 
-                if (!ativo || !exage) return null;
+                if (!ativo) {
+                    this.logger.log(`➕ Adicionando novo ativo: ${item.symbol}`);
+                    ativo = this.ativosRepository.create({ name: item.symbol, status: 1 });
+                    await this.ativosRepository.save(ativo);
+                }
 
-                // 🔥 Evita NaN no volume
-                const volumValue = parseFloat(contractInfo.max_notional);
+                // 🔥 Buscar a corretora Binance (exageId = 1)
+                const exage = await this.exageRepository.findOne({ where: { id: 1 } });
+                if (!exage) {
+                    this.logger.error('❌ Erro: Corretora Binance não encontrada no banco de dados!');
+                    continue;
+                }
+
+                // 🔥 Evita NaN no volume, usa `min_notional` caso `max_notional` não exista
+                const volumValue = parseFloat(contractInfo.min_notional);
                 const validVolum = isNaN(volumValue) ? 0 : volumValue;
-                const currentTimestamp = new Date();
-                const currentMinute = currentTimestamp.getMinutes();
 
                 // 🔥 Verifica se já existe um registro na tabela `precings`
                 let existingPrcing = await this.prcingRepository.findOne({
@@ -388,7 +562,7 @@ async getMexcFuturesPrices(): Promise<any[]> {
                     await this.prcingRepository.save(newPrcing);
                 }
 
-                // 🔥 Verifica se já existe um registro no histórico para esse ativo na MEXC no mesmo minuto
+                // 🔥 Verifica se já existe um registro no histórico para esse ativo na Binance no mesmo minuto
                 let existingHistory = await this.prcingHistoryRepository.findOne({
                     where: { 
                         ativo: { id: ativo.id }, 
@@ -408,250 +582,70 @@ async getMexcFuturesPrices(): Promise<any[]> {
                     await this.prcingHistoryRepository.save(newHistory);
                 }
 
-                return {
-                    pair: item.symbol.replace('_', '/'),
+                processedData.push({
+                    pair: item.symbol,
                     last_price: item.lastPrice,
-                    highest_price_24h: item.highPrice24h,
-                    lowest_price_24h: item.lowPrice24h,
-                    funding_rate: item.fundingRate,
+                    highest_price_24h: item.highPrice,
+                    lowest_price_24h: item.lowPrice,
+                    funding_rate: item.fundingRate || "N/A",
                     change_24h: item.priceChangePercent,
                     min_size: contractInfo.min_size,
                     max_size: contractInfo.max_size,
                     min_notional: contractInfo.min_notional,
-                    max_notional: contractInfo.max_notional,
-                };
-            })
-        );
+                });
+            }
 
-        return futuresPrices.filter(price => price !== null);
-    } catch (error) {
-        console.error('❌ Erro ao buscar preços futuros da MEXC:', error.message);
-        return [];
+            return processedData;
+        } catch (error) {
+            this.logger.error('❌ Erro ao buscar preços da Binance:', error.message);
+            return [];
+        }
     }
-}
 
-
-  
-  async getBitgetFuturesPrices(): Promise<BitgetTicker[]> {
-    const timestamp = String(Date.now());
-    const productType = 'umcbl'; // 🔥 Definindo explicitamente o tipo de mercado
-  
+    async getHtxFuturesPrices(): Promise<any[]> {
     try {
-      console.log(`🔍 Buscando dados da Bitget com productType=${productType}...`);
-  
-      const response = await axios.get<BitgetApiResponse<BitgetTicker[]>>(this.bitgetTickersAPI, {
-        params: { productType }, // 🔥 Garantindo que 'productType' não está vazio
-        headers: {
-          'ACCESS-KEY': BITGET_API_KEY!,
-          'ACCESS-SIGN': this.generateSignature(timestamp),
-          'ACCESS-TIMESTAMP': timestamp,
-          'ACCESS-PASSPHRASE': BITGET_PASSPHRASE!,
-          'Content-Type': 'application/json',
-        },
-      });
-  
-      if (response.data.code === '00000') {
-        console.log(`✅ Sucesso ao buscar dados da Bitget.`);
-        return response.data.data;
-      }
-  
-      console.warn(`⚠️ Erro ao buscar dados:`, response.data.msg);
-      return [];
-    } catch (error) {
-      console.error(`❌ Erro ao buscar dados da Bitget:`, error.response?.data || error.message);
-      return [];
-    }
-  }
+        console.log('🔍 Buscando preços da HTX (Huobi Futuros USDT-M)...');
 
-
-
-
-
-
-  async getBinanceFuturesPrices(): Promise<any[]> {
-    try {
-        this.logger.log('🔍 Buscando preços da Binance (Futuros USDT-M) usando proxy...');
-
-        // 🔥 Configuração do Axios para utilizar Proxy
-        // 🔥 Configuração do Axios para utilizar Proxy
-        const axiosConfig = {
-            httpsAgent: proxyAgent, // ✅ Proxy aplicado
-            timeout: 15000, // ✅ Timeout de 15s para evitar bloqueios
-        };
-
-        // 🔥 Buscar os ativos cadastrados no banco de dados
-        const ativos = await this.ativosRepository.find({ where: { status: 1 } });
-
-        // 🔥 Buscar os preços dos ativos futuros na Binance
-        const response = await axios.get(this.binanceFuturesAPI, axiosConfig);
-        const pricesData = Array.isArray(response.data) ? response.data : [];
+        // 🔥 Buscar preços dos ativos futuros da HTX
+        const response = await axios.get<{ data: any[] }>('https://api.huobi.pro/market/tickers');
+        const pricesData = (response.data as { data: any[] }).data || [];
 
         // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-        const contractsResponse = await axios.get(this.binanceContractsAPI, axiosConfig);
-        const contractsData = (contractsResponse.data as any).symbols || [];
+        const contractsResponse = await axios.get<{ data: any[] }>('https://api.hbdm.com/api/v1/contract_contract_info');
+        const contractsData = (contractsResponse.data as { data: any[] }).data || [];
 
-        // 🔥 Criar um tipo explícito para contratos
-        interface BinanceContractInfo {
-            min_size: string;
-            max_size: string;
-            min_notional: string;
-        }
+        // 🔥 Lista de moedas de interesse
+        const coinsOfInterest = ['BTC-USDT', 'ETH-USDT', 'BNB-USDT', 'ADA-USDT'];
 
         // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-        const contractMap = new Map<string, BinanceContractInfo>(
-            contractsData.map(contract => [
-                contract.symbol,
-                {
-                    min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
-                    max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
-                    min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
-                }
-            ])
-        );
-
-        const processedData: any[] = [];
-        const currentTimestamp = new Date();
-        const currentMinute = currentTimestamp.getMinutes();
-
-        for (const item of pricesData) {
-            const contractInfo: BinanceContractInfo = contractMap.get(item.symbol) || {
-                min_size: "N/A",
-                max_size: "N/A",
-                min_notional: "N/A",
-            };
-
-            // 🔥 Buscar o ativo correspondente no banco de dados
-            let ativo = await this.ativosRepository.findOne({ where: { name: item.symbol } });
-
-            if (!ativo) {
-                this.logger.log(`➕ Adicionando novo ativo: ${item.symbol}`);
-                ativo = this.ativosRepository.create({ name: item.symbol, status: 1 });
-                await this.ativosRepository.save(ativo);
-            }
-
-            // 🔥 Buscar a corretora Binance (exageId = 1)
-            const exage = await this.exageRepository.findOne({ where: { id: 1 } });
-            if (!exage) {
-                this.logger.error('❌ Erro: Corretora Binance não encontrada no banco de dados!');
-                continue;
-            }
-
-            // 🔥 Evita NaN no volume, usa `min_notional` caso `max_notional` não exista
-            const volumValue = parseFloat(contractInfo.min_notional);
-            const validVolum = isNaN(volumValue) ? 0 : volumValue;
-
-            // 🔥 Verifica se já existe um registro na tabela `precings`
-            let existingPrcing = await this.prcingRepository.findOne({
-                where: { ativo: { id: ativo.id }, exage: { id: exage.id } }
-            });
-
-            if (existingPrcing) {
-                // 🔥 Atualiza os dados da linha existente para evitar duplicação
-                existingPrcing.precing = parseFloat(item.lastPrice);
-                existingPrcing.volum = validVolum;
-                existingPrcing.updated_at = currentTimestamp;
-                await this.prcingRepository.save(existingPrcing);
-            } else {
-                // 🔥 Cria um novo registro caso não exista
-                const newPrcing = this.prcingRepository.create({
-                    ativo: ativo,
-                    exage: exage,
-                    precing: parseFloat(item.lastPrice),
-                    type: 1, // Mercado futuro
-                    volum: validVolum,
-                    status: 1,
-                    created_at: currentTimestamp,
-                    updated_at: currentTimestamp,
-                });
-                await this.prcingRepository.save(newPrcing);
-            }
-
-            // 🔥 Verifica se já existe um registro no histórico para esse ativo na Binance no mesmo minuto
-            let existingHistory = await this.prcingHistoryRepository.findOne({
-                where: { 
-                    ativo: { id: ativo.id }, 
-                    exage: { id: exage.id },
-                },
-                order: { timestamp: "DESC" } // 🔥 Pega o registro mais recente
-            });
-
-            if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== currentMinute) {
-                // 🔥 Cria um novo registro no histórico apenas se não houver um registro do mesmo minuto
-                const newHistory = this.prcingHistoryRepository.create({
-                    ativo: ativo,
-                    exage: exage,
-                    precing: parseFloat(item.lastPrice),
-                    timestamp: currentTimestamp,
-                });
-                await this.prcingHistoryRepository.save(newHistory);
-            }
-
-            processedData.push({
-                pair: item.symbol,
-                last_price: item.lastPrice,
-                highest_price_24h: item.highPrice,
-                lowest_price_24h: item.lowPrice,
-                funding_rate: item.fundingRate || "N/A",
-                change_24h: item.priceChangePercent,
-                min_size: contractInfo.min_size,
-                max_size: contractInfo.max_size,
-                min_notional: contractInfo.min_notional,
-            });
-        }
-
-        return processedData;
-    } catch (error) {
-        this.logger.error('❌ Erro ao buscar preços da Binance:', error.message);
-        return [];
-    }
-  }
-
-
-
-  async getHtxFuturesPrices(): Promise<any[]> {
-    try {
-      console.log('🔍 Buscando preços da HTX (Huobi Futuros USDT-M)...');
-  
-      // 🔥 Buscar preços dos ativos futuros da HTX
-      const response = await axios.get<{ data: any[] }>('https://api.huobi.pro/market/tickers');
-      const pricesData = (response.data as { data: any[] }).data || [];
-  
-      // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-      const contractsResponse = await axios.get<{ data: any[] }>('https://api.hbdm.com/api/v1/contract_contract_info');
-      const contractsData = (contractsResponse.data as { data: any[] }).data || [];
-  
-      // 🔥 Lista de moedas de interesse
-      const coinsOfInterest = ['BTC-USDT', 'ETH-USDT', 'BNB-USDT', 'ADA-USDT'];
-  
-      // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-      interface HtxContractInfo {
+        interface HtxContractInfo {
         min_size: string;
         max_size: string;
         min_notional: string;
-      }
-  
-      const contractMap = new Map<string, HtxContractInfo>(
+        }
+
+        const contractMap = new Map<string, HtxContractInfo>(
         contractsData.map(contract => [
-          contract.symbol,
-          {
+            contract.symbol,
+            {
             min_size: contract.contract_size || "N/A",   // 🔥 Volume mínimo em moeda
             max_size: contract.max_order_limit || "N/A", // 🔥 Volume máximo em moeda
             min_notional: contract.min_order_limit || "N/A", // 🔥 Volume mínimo em USDT
-          }
+            }
         ])
-      );
-  
-      // 🔥 Filtrar os pares desejados e incluir volume mínimo/máximo
-      return pricesData
+        );
+
+        // 🔥 Filtrar os pares desejados e incluir volume mínimo/máximo
+        return pricesData
         .filter((item) => coinsOfInterest.includes(item.symbol))
         .map((item) => {
-          const contractInfo: HtxContractInfo = contractMap.get(item.symbol) || {
+            const contractInfo: HtxContractInfo = contractMap.get(item.symbol) || {
             min_size: "N/A",
             max_size: "N/A",
             min_notional: "N/A",
-          };
-  
-          return {
+            };
+
+            return {
             pair: item.symbol.replace('-', '/'),
             last_price: item.close,
             highest_price_24h: item.high,
@@ -660,17 +654,17 @@ async getMexcFuturesPrices(): Promise<any[]> {
             min_size: contractInfo.min_size,
             max_size: contractInfo.max_size,
             min_notional: contractInfo.min_notional,
-          };
+            };
         });
-  
+
     } catch (error) {
-      console.error('❌ Erro ao buscar preços da HTX:', error.response?.data || error.message);
-      return [];
+        console.error('❌ Erro ao buscar preços da HTX:', error.response?.data || error.message);
+        return [];
     }
-  }
+    }
 
 
-  async getArbitrageOpportunities(): Promise<any[]> {
+    async getArbitrageOpportunities(): Promise<any[]> {
     try {
         this.logger.log('🔍 Analisando oportunidades de arbitragem...');
 
@@ -724,9 +718,9 @@ async getMexcFuturesPrices(): Promise<any[]> {
         this.logger.error('❌ Erro ao calcular oportunidades de arbitragem:', error.message);
         return [];
     }
-  }
+    }
 
-  async analisarArbitragemEntreCorretorasRealtime(ativo: string, longExage: string, shortExage: string): Promise<any> {
+    async analisarArbitragemEntreCorretorasRealtime(ativo: string, longExage: string, shortExage: string): Promise<any> {
     try {
         this.logger.log(`🔍 Buscando arbitragem em tempo real entre ${longExage} (Long) e ${shortExage} (Short) para ${ativo}...`);
 
@@ -762,10 +756,10 @@ async getMexcFuturesPrices(): Promise<any[]> {
         this.logger.error('❌ Erro ao buscar análise de arbitragem em tempo real:', error.message);
         return { error: 'Erro ao processar a solicitação' };
     }
-  }
+    }
 
 
-  async getPriceFromExchange(ativo: string, exchange: string): Promise<{ price: number; fundingRate: number; volume: number }> {
+    async getPriceFromExchange(ativo: string, exchange: string): Promise<{ price: number; fundingRate: number; volume: number }> {
     try {
         let url = '';
         let priceKey = '';
@@ -856,108 +850,108 @@ async getMexcFuturesPrices(): Promise<any[]> {
         this.logger.error(`❌ Erro inesperado ao buscar preço para ${ativo} na ${exchange}:`, error.message);
         return { price: 0, fundingRate: 0, volume: 0 };
     }
-  }
-
-
-async getHistoricalPrices(ativo: string, exchange: string): Promise<any[]> {
-try {
-    this.logger.log(`🔍 Buscando os últimos preços disponíveis para ${ativo} na ${exchange}...`);
-
-    let url = '';
-
-    // 🔥 Ajustar formato do ativo para corretoras específicas (Gate.io e MEXC exigem BTC_USDT)
-    const formattedAtivo = exchange.toLowerCase() === 'gate.io' || exchange.toLowerCase() === 'mexc'
-        ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT') 
-        : ativo;
-
-    switch (exchange.toLowerCase()) {
-        case 'binance':
-            url = `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${formattedAtivo}`;
-            break;
-        case 'gate.io':
-            url = `https://api.gateio.ws/api/v4/futures/usdt/tickers`;
-            break;
-        case 'mexc':
-            url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
-            break;
-        case 'bitget':
-            url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${formattedAtivo}`;
-            break;
-        case 'htx':
-            url = `https://api.huobi.pro/market/detail/merged?symbol=${formattedAtivo.toLowerCase()}`;
-            break;
-        default:
-            this.logger.error(`❌ Exchange ${exchange} não reconhecida.`);
-            return [];
     }
 
-    const response = await axios.get(url, { timeout: 10000 });
 
-    // 🔥 Verificação de resposta válida
-    if (response.status !== 200 || !response.data) {
-        throw new Error(`Resposta inválida da API (${exchange})`);
-    }
+    async getHistoricalPrices(ativo: string, exchange: string): Promise<any[]> {
+    try {
+        this.logger.log(`🔍 Buscando os últimos preços disponíveis para ${ativo} na ${exchange}...`);
 
-    let priceData: { price: string; timestamp: number } | null = null;
+        let url = '';
 
-    // 🔥 **Corrigindo a validação usando `typeof` e `Array.isArray()`**
-    if (exchange.toLowerCase() === 'binance' && typeof response.data === 'object' && 'price' in response.data) {
-        priceData = {
-            price: parseFloat((response.data as { price: string }).price).toString(),
-            timestamp: Date.now()
-        };
-    }
+        // 🔥 Ajustar formato do ativo para corretoras específicas (Gate.io e MEXC exigem BTC_USDT)
+        const formattedAtivo = exchange.toLowerCase() === 'gate.io' || exchange.toLowerCase() === 'mexc'
+            ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT') 
+            : ativo;
 
-    if (exchange.toLowerCase() === 'gate.io' && Array.isArray(response.data)) {
-        const gateData = response.data.find((item: any) => item.contract === formattedAtivo);
-        if (gateData && typeof gateData === 'object' && 'last' in gateData) {
+        switch (exchange.toLowerCase()) {
+            case 'binance':
+                url = `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${formattedAtivo}`;
+                break;
+            case 'gate.io':
+                url = `https://api.gateio.ws/api/v4/futures/usdt/tickers`;
+                break;
+            case 'mexc':
+                url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
+                break;
+            case 'bitget':
+                url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${formattedAtivo}`;
+                break;
+            case 'htx':
+                url = `https://api.huobi.pro/market/detail/merged?symbol=${formattedAtivo.toLowerCase()}`;
+                break;
+            default:
+                this.logger.error(`❌ Exchange ${exchange} não reconhecida.`);
+                return [];
+        }
+
+        const response = await axios.get(url, { timeout: 10000 });
+
+        // 🔥 Verificação de resposta válida
+        if (response.status !== 200 || !response.data) {
+            throw new Error(`Resposta inválida da API (${exchange})`);
+        }
+
+        let priceData: { price: string; timestamp: number } | null = null;
+
+        // 🔥 **Corrigindo a validação usando `typeof` e `Array.isArray()`**
+        if (exchange.toLowerCase() === 'binance' && typeof response.data === 'object' && 'price' in response.data) {
             priceData = {
-                price: parseFloat(gateData.last).toString(),
+                price: parseFloat((response.data as { price: string }).price).toString(),
                 timestamp: Date.now()
             };
         }
-    }
 
-    if (exchange.toLowerCase() === 'mexc' && typeof response.data === 'object' && response.data.hasOwnProperty('data')) {
-        const mexcData = response.data as { data: { lastPrice: string } };
-        if ('lastPrice' in mexcData.data) {
-            priceData = {
-                price: parseFloat(mexcData.data.lastPrice).toString(),
-                timestamp: Date.now()
-            };
+        if (exchange.toLowerCase() === 'gate.io' && Array.isArray(response.data)) {
+            const gateData = response.data.find((item: any) => item.contract === formattedAtivo);
+            if (gateData && typeof gateData === 'object' && 'last' in gateData) {
+                priceData = {
+                    price: parseFloat(gateData.last).toString(),
+                    timestamp: Date.now()
+                };
+            }
         }
-    }
 
-    if (exchange.toLowerCase() === 'bitget' && typeof response.data === 'object' && response.data.hasOwnProperty('data')) {
-        const bitgetData = response.data as { data: { last: string } };
-        if ('last' in bitgetData.data) {
-            priceData = {
-                price: parseFloat(bitgetData.data.last).toString(),
-                timestamp: Date.now()
-            };
+        if (exchange.toLowerCase() === 'mexc' && typeof response.data === 'object' && response.data.hasOwnProperty('data')) {
+            const mexcData = response.data as { data: { lastPrice: string } };
+            if ('lastPrice' in mexcData.data) {
+                priceData = {
+                    price: parseFloat(mexcData.data.lastPrice).toString(),
+                    timestamp: Date.now()
+                };
+            }
         }
-    }
 
-    if (exchange.toLowerCase() === 'htx' && typeof response.data === 'object' && response.data.hasOwnProperty('tick')) {
-        const htxData = response.data as { tick: { close: string } };
-        if ('close' in htxData.tick) {
-            priceData = {
-                price: parseFloat(htxData.tick.close).toString(),
-                timestamp: Date.now()
-            };
+        if (exchange.toLowerCase() === 'bitget' && typeof response.data === 'object' && response.data.hasOwnProperty('data')) {
+            const bitgetData = response.data as { data: { last: string } };
+            if ('last' in bitgetData.data) {
+                priceData = {
+                    price: parseFloat(bitgetData.data.last).toString(),
+                    timestamp: Date.now()
+                };
+            }
         }
-    }
 
-    if (!priceData || parseFloat(priceData.price) === 0) {
-        throw new Error(`Preço inválido retornado da ${exchange}`);
-    }
+        if (exchange.toLowerCase() === 'htx' && typeof response.data === 'object' && response.data.hasOwnProperty('tick')) {
+            const htxData = response.data as { tick: { close: string } };
+            if ('close' in htxData.tick) {
+                priceData = {
+                    price: parseFloat(htxData.tick.close).toString(),
+                    timestamp: Date.now()
+                };
+            }
+        }
 
-    return [priceData];
-} catch (error) {
-    this.logger.error(`❌ Erro ao buscar os últimos preços para ${ativo} na ${exchange}:`, error.message);
-    return [];
-}
-}
+        if (!priceData || parseFloat(priceData.price) === 0) {
+            throw new Error(`Preço inválido retornado da ${exchange}`);
+        }
+
+        return [priceData];
+    } catch (error) {
+        this.logger.error(`❌ Erro ao buscar os últimos preços para ${ativo} na ${exchange}:`, error.message);
+        return [];
+    }
+    }
 
 
 

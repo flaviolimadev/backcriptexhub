@@ -8,7 +8,7 @@ import { ArbitrageModule } from './arbitrage/arbitrage.module';
 import { AtivosModule } from './ativos/ativos.module';
 import { ExagesModule } from "./exages/exages.module";
 import { PrecingsModule } from "./precing/precings.module";
-
+import { ScheduleModule } from '@nestjs/schedule'; // 📌 Importação do módulo de agendamento
 
 @Module({
   imports: [
@@ -21,6 +21,7 @@ import { PrecingsModule } from "./precing/precings.module";
         rejectUnauthorized: false,
       },
     }),
+    ScheduleModule.forRoot(), 
     UsersModule,
     AuthModule,
     ArbitrageModule,
