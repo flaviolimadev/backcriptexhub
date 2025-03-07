@@ -9,7 +9,7 @@ export class Ativo {
   @Column({ type: 'varchar', length: 255, unique: true })
   name: string;
 
-  @Column({ type: 'tinyint', default: 1 })
+  @Column({ type: 'int', default: 1 })
   status: number; // 1 = Disponível, 0 = Indisponível para análise
 
   @Column({ type: 'varchar', length: 255, nullable: true })
