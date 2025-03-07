@@ -13,12 +13,12 @@ import { PrecingsModule } from "./precing/precings.module";
 @Module({
   imports: [
     TypeOrmModule.forRoot({
-      type: 'mysql',
-      host: 'localhost',
-      port: 3306,
-      username: 'root',
-      password: '',
-      database: 'criptexv3',
+      type: 'postgres',
+      host: 'dpg-cv5kt7t2ng1s73dfqssg-a',
+      port: 5432,
+      username: 'banco_criptexv3_user',
+      password: 'HV66F2rCmG2gYJxrti1xEOCPTzXsaTgc',
+      database: 'banco_criptexv3',
       autoLoadEntities: true,
       synchronize: true, // ⚠️ Apenas para desenvolvimento, remova em produção
     }),
