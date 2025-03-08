@@ -463,145 +463,105 @@ export class ArbitrageService {
     }
     }
 
-    @Cron('*/60 * * * * *')  // Executa a cada 20 segundos
-    async getBinanceFuturesPrices(): Promise<any[]> {
-        try {
-            this.logger.log('🔍 Buscando preços da Binance (Futuros USDT-M) usando proxy...');
+    @Cron('*/60 * * * * *')  // 🔥 Executa a cada 15 segundos
+  async getBinanceFuturesPrices(): Promise<void> {
+    try {
+      this.logger.log('🔍 Buscando preços da Binance...');
 
-            // 🔥 Configuração do Axios para utilizar Proxy
-            // 🔥 Configuração do Axios para utilizar Proxy
-            const axiosConfig = {
-                httpsAgent: proxyAgent, // ✅ Proxy aplicado
-                timeout: 15000, // ✅ Timeout de 15s para evitar bloqueios
-            };
+      const axiosConfig = {
+        httpsAgent: proxyAgent,
+        timeout: 15000,
+      };
 
-            // 🔥 Buscar os ativos cadastrados no banco de dados
-            const ativos = await this.ativosRepository.find({ where: { status: 1 } });
+      const [ativos, exages, response, contractsResponse] = await Promise.all([
+        this.ativosRepository.find({ where: { status: 1 } }),
+        this.exageRepository.find(),
+        axios.get(this.binanceFuturesAPI, axiosConfig),
+        axios.get(this.binanceContractsAPI, axiosConfig),
+      ]);
 
-            // 🔥 Buscar os preços dos ativos futuros na Binance
-            const response = await axios.get(this.binanceFuturesAPI, axiosConfig);
-            const pricesData = Array.isArray(response.data) ? response.data : [];
+      const ativosMap = new Map(ativos.map(a => [a.name, a]));
+      const exage = exages.find(e => e.id === 1);
 
-            // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-            const contractsResponse = await axios.get(this.binanceContractsAPI, axiosConfig);
-            const contractsData = (contractsResponse.data as any).symbols || [];
+      if (!exage) {
+        this.logger.error('❌ Corretora Binance não encontrada!');
+        return;
+      }
 
-            // 🔥 Criar um tipo explícito para contratos
-            interface BinanceContractInfo {
-                min_size: string;
-                max_size: string;
-                min_notional: string;
-            }
+      const contractMap = new Map(
+        contractsResponse.data.symbols.map(contract => [
+          contract.symbol,
+          {
+            min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
+            max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
+            min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
+          },
+        ])
+      );
 
-            // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-            const contractMap = new Map<string, BinanceContractInfo>(
-                contractsData.map(contract => [
-                    contract.symbol,
-                    {
-                        min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
-                        max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
-                        min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
-                    }
-                ])
-            );
+      const pricesData = Array.isArray(response.data) ? response.data : [];
 
-            const processedData: any[] = [];
-            const currentTimestamp = new Date();
-            const currentMinute = currentTimestamp.getMinutes();
+      const bulkUpdates = [];
+      const bulkInserts = [];
+      const bulkHistory = [];
+      const now = new Date();
 
-            for (const item of pricesData) {
-                const contractInfo: BinanceContractInfo = contractMap.get(item.symbol) || {
-                    min_size: "N/A",
-                    max_size: "N/A",
-                    min_notional: "N/A",
-                };
+      for (const item of pricesData) {
+        const ativo = ativosMap.get(item.symbol);
 
-                // 🔥 Buscar o ativo correspondente no banco de dados
-                let ativo = await this.ativosRepository.findOne({ where: { name: item.symbol } });
+        if (!ativo) continue;
 
-                if (!ativo) {
-                    this.logger.log(`➕ Adicionando novo ativo: ${item.symbol}`);
-                    ativo = this.ativosRepository.create({ name: item.symbol, status: 1 });
-                    await this.ativosRepository.save(ativo);
-                }
+        const contractInfo = contractMap.get(item.symbol) || {};
+        const validVolum = parseFloat(contractInfo.min_notional || '0') || 0;
 
-                // 🔥 Buscar a corretora Binance (exageId = 1)
-                const exage = await this.exageRepository.findOne({ where: { id: 1 } });
-                if (!exage) {
-                    this.logger.error('❌ Erro: Corretora Binance não encontrada no banco de dados!');
-                    continue;
-                }
+        const existingPrcing = await this.prcingRepository.findOne({
+          where: { ativo: { id: ativo.id }, exage: { id: exage.id } },
+        });
 
-                // 🔥 Evita NaN no volume, usa `min_notional` caso `max_notional` não exista
-                const volumValue = parseFloat(contractInfo.min_notional);
-                const validVolum = isNaN(volumValue) ? 0 : volumValue;
-
-                // 🔥 Verifica se já existe um registro na tabela `precings`
-                let existingPrcing = await this.prcingRepository.findOne({
-                    where: { ativo: { id: ativo.id }, exage: { id: exage.id } }
-                });
-
-                if (existingPrcing) {
-                    // 🔥 Atualiza os dados da linha existente para evitar duplicação
-                    existingPrcing.precing = parseFloat(item.lastPrice);
-                    existingPrcing.volum = validVolum;
-                    existingPrcing.updated_at = currentTimestamp;
-                    await this.prcingRepository.save(existingPrcing);
-                } else {
-                    // 🔥 Cria um novo registro caso não exista
-                    const newPrcing = this.prcingRepository.create({
-                        ativo: ativo,
-                        exage: exage,
-                        precing: parseFloat(item.lastPrice),
-                        type: 1, // Mercado futuro
-                        volum: validVolum,
-                        status: 1,
-                        created_at: currentTimestamp,
-                        updated_at: currentTimestamp,
-                    });
-                    await this.prcingRepository.save(newPrcing);
-                }
-
-                // 🔥 Verifica se já existe um registro no histórico para esse ativo na Binance no mesmo minuto
-                let existingHistory = await this.prcingHistoryRepository.findOne({
-                    where: { 
-                        ativo: { id: ativo.id }, 
-                        exage: { id: exage.id },
-                    },
-                    order: { timestamp: "DESC" } // 🔥 Pega o registro mais recente
-                });
-
-                if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== currentMinute) {
-                    // 🔥 Cria um novo registro no histórico apenas se não houver um registro do mesmo minuto
-                    const newHistory = this.prcingHistoryRepository.create({
-                        ativo: ativo,
-                        exage: exage,
-                        precing: parseFloat(item.lastPrice),
-                        timestamp: currentTimestamp,
-                    });
-                    await this.prcingHistoryRepository.save(newHistory);
-                }
-
-                processedData.push({
-                    pair: item.symbol,
-                    last_price: item.lastPrice,
-                    highest_price_24h: item.highPrice,
-                    lowest_price_24h: item.lowPrice,
-                    funding_rate: item.fundingRate || "N/A",
-                    change_24h: item.priceChangePercent,
-                    min_size: contractInfo.min_size,
-                    max_size: contractInfo.max_size,
-                    min_notional: contractInfo.min_notional,
-                });
-            }
-
-            return processedData;
-        } catch (error) {
-            this.logger.error('❌ Erro ao buscar preços da Binance:', error.message);
-            return [];
+        if (existingPrcing) {
+          bulkUpdates.push({
+            id: existingPrcing.id,
+            precing: parseFloat(item.lastPrice),
+            volum: validVolum,
+            updated_at: now,
+          });
+        } else {
+          bulkInserts.push({
+            ativo,
+            exage,
+            precing: parseFloat(item.lastPrice),
+            type: 1,
+            volum: validVolum,
+            status: 1,
+            created_at: now,
+            updated_at: now,
+          });
         }
-    }
 
+        bulkHistory.push({
+          ativo,
+          exage,
+          precing: parseFloat(item.lastPrice),
+          timestamp: now,
+        });
+      }
+
+      if (bulkUpdates.length > 0) {
+        await this.prcingRepository.save(bulkUpdates);
+      }
+      if (bulkInserts.length > 0) {
+        await this.prcingRepository.save(this.prcingRepository.create(bulkInserts));
+      }
+      if (bulkHistory.length > 0) {
+        await this.prcingHistoryRepository.save(this.prcingHistoryRepository.create(bulkHistory));
+      }
+
+      this.logger.log(`✅ Atualização concluída (${bulkUpdates.length} atualizados, ${bulkInserts.length} inseridos).`);
+
+    } catch (error) {
+      this.logger.error(`❌ Erro ao buscar preços da Binance: ${error.message}`);
+    }
+  }
     async getHtxFuturesPrices(): Promise<any[]> {
     try {
         console.log('🔍 Buscando preços da HTX (Huobi Futuros USDT-M)...');
@@ -666,59 +626,54 @@ export class ArbitrageService {
 
     async getArbitrageOpportunities(): Promise<any[]> {
     try {
-        this.logger.log('🔍 Analisando oportunidades de arbitragem...');
+      this.logger.log('🔍 Analisando oportunidades de arbitragem...');
 
-        // 🔥 Buscar todos os preços armazenados no banco de dados
-        const precings = await this.prcingRepository.find({
-            relations: ['ativo', 'exage'], // 🔥 Traz os relacionamentos para acessar nome do ativo e corretora
-        });
+      const precings = await this.prcingRepository.find({
+        relations: ['ativo', 'exage'],
+      });
 
-        // 🔥 Organizar os preços por ativo
-        const precingsByAtivo: Record<string, any[]> = {};
-        precings.forEach((p) => {
-            const ativoName = p.ativo.name;
-            if (!precingsByAtivo[ativoName]) {
-                precingsByAtivo[ativoName] = [];
-            }
-            precingsByAtivo[ativoName].push(p);
-        });
-
-        const oportunidades: any[] = [];
-
-        for (const ativo in precingsByAtivo) {
-            const precings = precingsByAtivo[ativo];
-
-            // 🔥 Encontrar a corretora com menor e maior preço
-            const compra = precings.reduce((min, p) => (Number(p.precing) < Number(min.precing) ? p : min), precings[0]);
-            const venda = precings.reduce((max, p) => (Number(p.precing) > Number(max.precing) ? p : max), precings[0]);
-
-            if (compra && venda && Number(compra.precing) < Number(venda.precing)) {
-                // 🔥 Garantindo que o valor seja tratado como número
-                const precoCompra = Number(compra.precing);
-                const precoVenda = Number(venda.precing);
-                const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
-
-                // 🔥 Tempo de atualização em segundos
-                const atualizado = Math.floor((Date.now() - new Date(compra.updated_at).getTime()) / 1000);
-                
-                oportunidades.push({
-                    Moeda: ativo,
-                    Compra: compra.exage.name,
-                    Venda: venda.exage.name,
-                    Precing_Compra: precoCompra.toFixed(4),
-                    Precing_Venda: precoVenda.toFixed(4),
-                    Spread: spread.toFixed(2) + '%',
-                    Atualizado: atualizado + ' segundos atrás',
-                });
-            }
+      const precingsByAtivo: Record<string, any[]> = {};
+      precings.forEach((p) => {
+        const ativoName = p.ativo.name;
+        if (!precingsByAtivo[ativoName]) {
+          precingsByAtivo[ativoName] = [];
         }
+        precingsByAtivo[ativoName].push(p);
+      });
 
-        return oportunidades;
+      const oportunidades: any[] = [];
+
+      for (const ativo in precingsByAtivo) {
+        const precings = precingsByAtivo[ativo];
+
+        const compra = precings.reduce((min, p) => (Number(p.precing) < Number(min.precing) ? p : min), precings[0]);
+        const venda = precings.reduce((max, p) => (Number(p.precing) > Number(max.precing) ? p : max), precings[0]);
+
+        if (compra && venda && Number(compra.precing) < Number(venda.precing)) {
+          const precoCompra = Number(compra.precing);
+          const precoVenda = Number(venda.precing);
+          const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
+
+          const atualizado = Math.floor((Date.now() - new Date(compra.updated_at).getTime()) / 1000);
+
+          oportunidades.push({
+            Moeda: ativo,
+            Compra: compra.exage.name,
+            Venda: venda.exage.name,
+            Precing_Compra: precoCompra.toFixed(4),
+            Precing_Venda: precoVenda.toFixed(4),
+            Spread: spread.toFixed(2) + '%',
+            Atualizado: atualizado + ' segundos atrás',
+          });
+        }
+      }
+
+      return oportunidades;
     } catch (error) {
-        this.logger.error('❌ Erro ao calcular oportunidades de arbitragem:', error.message);
-        return [];
+      this.logger.error('❌ Erro ao calcular oportunidades de arbitragem:', error.message);
+      return [];
     }
-    }
+  }
 
     async analisarArbitragemEntreCorretorasRealtime(ativo: string, longExage: string, shortExage: string): Promise<any> {
     try {
