@@ -14,7 +14,7 @@ import { ScheduleModule } from '@nestjs/schedule'; // 📌 Importação do módu
   imports: [
     TypeOrmModule.forRoot({
       type: 'postgres',
-      url: 'postgresql://criptexv3:2eqb37g6u3fv@db-57709.dc-sp-1.absamcloud.com/criptexv3',
+      url: 'postgresql://user_criptexv3:2eqb37g6u3fv@db-57709.dc-sp-1.absamcloud.com/criptexv3',
       autoLoadEntities: true,
       synchronize: true,
       ssl: {
