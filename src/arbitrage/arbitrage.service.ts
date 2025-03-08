@@ -201,241 +201,288 @@ export class ArbitrageService {
 
     @Cron('*/40 * * * * *')  // Executa a cada 20 segundos
     async getGateIoFuturesPrices(): Promise<any[]> {
-    try {
-        // 🔥 Buscar os ativos cadastrados no banco de dados
-        const ativos = await this.ativosRepository.find({ where: { status: 1 } });
-
-        // 🔥 Converter os nomes dos ativos para o formato esperado pela API (BTCUSDT → BTC_USDT)
-        const coinsOfInterest = ativos.map(ativo => ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'));
-
-        // 🔥 Buscar os preços dos ativos futuros na Gate.io
-        const response = await axios.get<{ contract: string; last: string; highest_price_24h: string; lowest_price_24h: string; funding_rate: string; change_percent: string; }[]>(this.gateIoAPI);
-
-        // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-        const contractsResponse = await axios.get<{ name: string; order_size_min: string; order_size_max: string; order_value_min: string; order_value_max: string; }[]>(this.gateIoContractsAPI);
-
-        // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-        const contractMap = new Map(contractsResponse.data.map(contract => [
+        try {
+          this.logger.log('🔍 Buscando preços futuros da Gate.io...');
+      
+          // 🔥 Buscar os ativos cadastrados no banco de dados (somente ID e nome para reduzir carga)
+          const ativos = await this.ativosRepository.find({ 
+            select: ['id', 'name'], 
+            where: { status: 1 } 
+          });
+      
+          if (ativos.length === 0) {
+            this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na Gate.io.');
+            return [];
+          }
+      
+          // 🔥 Criar um mapa de ativos para acesso rápido
+          const ativosMap = new Map(ativos.map(ativo => [ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'), ativo.id]));
+      
+          // 🔥 Buscar as APIs da Gate.io em paralelo
+          const [pricesResponse, contractsResponse] = await Promise.all([
+            axios.get<{ contract: string; last: string; highest_price_24h: string; lowest_price_24h: string; funding_rate: string; change_percent: string; }[]>(this.gateIoAPI),
+            axios.get<{ name: string; order_size_min: string; order_size_max: string; order_value_min: string; order_value_max: string; }[]>(this.gateIoContractsAPI)
+          ]);
+      
+          const pricesData = pricesResponse.data || [];
+          const contractsData = contractsResponse.data || [];
+      
+          // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
+          const contractMap = new Map(contractsData.map(contract => [
             contract.name, 
             {
-                min_size: contract.order_size_min,  // Volume mínimo em moeda
-                max_size: contract.order_size_max,  // Volume máximo em moeda
-                min_notional: contract.order_value_min, // Volume mínimo em USDT
-                max_notional: contract.order_value_max, // Volume máximo em USDT
+              min_size: contract.order_size_min || "N/A",  
+              max_size: contract.order_size_max || "N/A",  
+              min_notional: contract.order_value_min || "N/A", 
+              max_notional: contract.order_value_max || "N/A"
             }
-        ]));
-
-        // 🔥 Filtrar os pares desejados e incluir volume mínimo/máximo
-        const futuresPrices = await Promise.all(response.data
-            .filter(item => coinsOfInterest.includes(item.contract))
-            .map(async (item) => {
-                const contractInfo = contractMap.get(item.contract) || {
-                    min_size: "N/A",
-                    max_size: "N/A",
-                    min_notional: "N/A",
-                    max_notional: "N/A",
-                };
-
-                // 🔥 Buscar os registros correspondentes no banco
-                const ativo = await this.ativosRepository.findOne({ where: { name: item.contract.replace('_', '') } });
-                const exage = await this.exageRepository.findOne({ where: { id: 2 } }); // 🔥 Gate.io ID = 2
-
-                if (!ativo || !exage) return null;
-
-                // 🔥 Evita NaN no volume
-                const volumValue = parseFloat(contractInfo.max_notional);
-                const validVolum = isNaN(volumValue) ? 0 : volumValue;
-
-                // 🔥 Verifica se já existe um registro na tabela `precings`
-                let existingPrcing = await this.prcingRepository.findOne({
-                    where: { ativo: { id: ativo.id }, exage: { id: exage.id } }
-                });
-
-                if (existingPrcing) {
-                    // 🔥 Atualiza os dados da linha existente para evitar duplicação
-                    existingPrcing.precing = parseFloat(item.last);
-                    existingPrcing.volum = validVolum;
-                    existingPrcing.updated_at = new Date(); // Atualiza a data de modificação
-                    await this.prcingRepository.save(existingPrcing);
-                } else {
-                    // 🔥 Cria um novo registro caso não exista
-                    const newPrcing = this.prcingRepository.create({
-                        ativo: ativo,
-                        exage: exage,
-                        precing: parseFloat(item.last),
-                        type: 1, // Mercado futuro
-                        volum: validVolum,
-                        status: 1,
-                        created_at: new Date(),
-                        updated_at: new Date(),
-                    });
-                    await this.prcingRepository.save(newPrcing);
-                }
-
-                // 🔥 Gerar timestamp da coleta
-                const now = new Date();
-                now.setSeconds(0, 0); // Remove segundos e milissegundos para agrupar por minuto
-
-                // 🔥 Verificar se já existe um histórico no mesmo minuto
-                let existingHistory = await this.prcingHistoryRepository.findOne({
-                    where: { ativo: { id: ativo.id }, exage: { id: exage.id }, timestamp: now }
-                });
-
-                if (existingHistory) {
-                    // 🔥 Atualiza o preço no histórico se já existir um no mesmo minuto
-                    existingHistory.precing = parseFloat(item.last);
-                    await this.prcingHistoryRepository.save(existingHistory);
-                } else {
-                    // 🔥 Insere um novo registro no histórico
-                    const newHistory = this.prcingHistoryRepository.create({
-                        ativo: ativo,
-                        exage: exage,
-                        precing: parseFloat(item.last),
-                        timestamp: now,
-                    });
-                    await this.prcingHistoryRepository.save(newHistory);
-                }
-
-                return {
-                    pair: item.contract.replace('_', '/'),
-                    last_price: item.last,
-                    highest_price_24h: item.highest_price_24h,
-                    lowest_price_24h: item.lowest_price_24h,
-                    funding_rate: item.funding_rate,
-                    change_24h: item.change_percent,
-                    min_size: contractInfo.min_size,
-                    max_size: contractInfo.max_size,
-                    min_notional: contractInfo.min_notional,
-                    max_notional: contractInfo.max_notional,
-                };
-            })
-        );
-
-        return futuresPrices.filter(price => price !== null);
-    } catch (error) {
-        console.error('❌ Erro ao buscar preços futuros da Gate.io:', error.message);
-        return [];
-    } 
-    }
+          ]));
+      
+          // 🔥 Buscar a exchange Gate.io (evita busca repetitiva)
+          const exage = await this.exageRepository.findOne({ where: { id: 2 } });
+          if (!exage) {
+            this.logger.error('❌ Erro: Exchange Gate.io não encontrada no banco de dados.');
+            return [];
+          }
+      
+          const now = new Date();
+          now.setSeconds(0, 0); // Remove segundos e milissegundos para agrupar por minuto
+      
+          // 🔥 Definir tipos explícitos para os arrays de batch
+          const bulkUpdates: { id: number; precing: number; volum: number; updated_at: Date }[] = [];
+          const bulkInserts: { ativo: { id: number }; exage: { id: number }; precing: number; type: number; volum: number; status: number; created_at: Date; updated_at: Date }[] = [];
+          const bulkHistory: { ativo: { id: number }; exage: { id: number }; precing: number; timestamp: Date }[] = [];
+      
+          for (const item of pricesData) {
+            const ativoId = ativosMap.get(item.contract);
+            if (!ativoId) continue; // 🔥 Ignorar ativos não cadastrados
+      
+            const contractInfo = contractMap.get(item.contract) || {
+              min_size: "N/A",
+              max_size: "N/A",
+              min_notional: "N/A",
+              max_notional: "N/A"
+            };
+      
+            const validVolum = parseFloat(contractInfo.max_notional) || 0;
+            const lastPrice = parseFloat(item.last) || 0;
+      
+            // 🔥 Verifica se já existe um registro na tabela `precings`
+            const existingPrcing = await this.prcingRepository.findOne({
+              select: ['id', 'precing', 'volum'],
+              where: { ativo: { id: ativoId }, exage: { id: exage.id } }
+            });
+      
+            if (existingPrcing) {
+              bulkUpdates.push({
+                id: existingPrcing.id,
+                precing: lastPrice,
+                volum: validVolum,
+                updated_at: now
+              });
+            } else {
+              bulkInserts.push({
+                ativo: { id: ativoId },
+                exage: { id: exage.id },
+                precing: lastPrice,
+                type: 1,
+                volum: validVolum,
+                status: 1,
+                created_at: now,
+                updated_at: now
+              });
+            }
+      
+            // 🔥 Verifica se já existe um registro no histórico para esse ativo na Gate.io no mesmo minuto
+            const existingHistory = await this.prcingHistoryRepository.findOne({
+              where: { ativo: { id: ativoId }, exage: { id: exage.id } },
+              order: { timestamp: "DESC" }
+            });
+      
+            if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== now.getMinutes()) {
+              bulkHistory.push({
+                ativo: { id: ativoId },
+                exage: { id: exage.id },
+                precing: lastPrice,
+                timestamp: now
+              });
+            }
+          }
+      
+          // 🔥 Realizar inserções e atualizações em batch para evitar carga excessiva no banco
+          if (bulkUpdates.length > 0) {
+            await this.prcingRepository.save(bulkUpdates);
+          }
+          if (bulkInserts.length > 0) {
+            await this.prcingRepository.save(bulkInserts);
+          }
+          if (bulkHistory.length > 0) {
+            await this.prcingHistoryRepository.save(bulkHistory);
+          }
+      
+          this.logger.log(`✅ Atualizados ${bulkUpdates.length}, Inseridos ${bulkInserts.length}, Histórico ${bulkHistory.length}`);
+      
+          return pricesData.map(item => ({
+            pair: item.contract.replace('_', '/'),
+            last_price: item.last,
+            highest_price_24h: item.highest_price_24h,
+            lowest_price_24h: item.lowest_price_24h,
+            funding_rate: item.funding_rate,
+            change_24h: item.change_percent,
+            min_size: contractMap.get(item.contract)?.min_size || "N/A",
+            max_size: contractMap.get(item.contract)?.max_size || "N/A",
+            min_notional: contractMap.get(item.contract)?.min_notional || "N/A",
+            max_notional: contractMap.get(item.contract)?.max_notional || "N/A"
+          }));
+        } catch (error) {
+          this.logger.error(`❌ Erro ao buscar preços futuros da Gate.io: ${error.message}`);
+          return [];
+        }
+      }
+      
 
     @Cron('*/41 * * * * *')  // Executa a cada 20 segundos
     async getMexcFuturesPrices(): Promise<any[]> {
         try {
-            // 🔥 Buscar os ativos cadastrados no banco de dados
-            const ativos = await this.ativosRepository.find({ where: { status: 1 } });
-
-            // 🔥 Converter os nomes dos ativos para o formato esperado pela API (BTCUSDT → BTC_USDT)
-            const coinsOfInterest = ativos.map(ativo => ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'));
-
-            // 🔥 Buscar os preços dos ativos futuros na MEXC
-            const response = await axios.get<{ data: { symbol: string; lastPrice: string; highPrice24h: string; lowPrice24h: string; fundingRate: string; priceChangePercent: string; }[] }>(this.mexcAPI);
-            const pricesData = response.data.data || [];
-
-            // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-            const contractsResponse = await axios.get<{ data: { symbol: string; minVol: string; maxVol: string; minAmount: string; maxAmount: string; }[] }>(this.mexcContractsAPI);
-            const contractsData = contractsResponse.data.data || [];
-
-            // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-            const contractMap = new Map(contractsData.map(contract => [
-                contract.symbol, 
-                {
-                    min_size: contract.minVol || "N/A",  // Volume mínimo em moeda
-                    max_size: contract.maxVol || "N/A",  // Volume máximo em moeda
-                    min_notional: contract.minAmount || "N/A", // Volume mínimo em USDT
-                    max_notional: contract.maxAmount || "N/A", // Volume máximo em USDT
-                }
-            ]));
-
-            // 🔥 Iterar pelos ativos e atualizar/inserir no banco de dados
-            const futuresPrices = await Promise.all(pricesData
-                .filter(item => coinsOfInterest.includes(item.symbol))
-                .map(async (item) => {
-                    const contractInfo = contractMap.get(item.symbol) || {
-                        min_size: "N/A",
-                        max_size: "N/A",
-                        min_notional: "N/A",
-                        max_notional: "N/A",
-                    };
-
-                    // 🔥 Buscar os registros correspondentes no banco
-                    const ativo = await this.ativosRepository.findOne({ where: { name: item.symbol.replace('_', '') } });
-                    const exage = await this.exageRepository.findOne({ where: { id: 3 } }); // 🔥 MEXC ID = 3
-
-                    if (!ativo || !exage) return null;
-
-                    // 🔥 Evita NaN no volume
-                    const volumValue = parseFloat(contractInfo.max_notional);
-                    const validVolum = isNaN(volumValue) ? 0 : volumValue;
-                    const currentTimestamp = new Date();
-                    const currentMinute = currentTimestamp.getMinutes();
-
-                    // 🔥 Verifica se já existe um registro na tabela `precings`
-                    let existingPrcing = await this.prcingRepository.findOne({
-                        where: { ativo: { id: ativo.id }, exage: { id: exage.id } }
-                    });
-
-                    if (existingPrcing) {
-                        // 🔥 Atualiza os dados da linha existente para evitar duplicação
-                        existingPrcing.precing = parseFloat(item.lastPrice);
-                        existingPrcing.volum = validVolum;
-                        existingPrcing.updated_at = currentTimestamp;
-                        await this.prcingRepository.save(existingPrcing);
-                    } else {
-                        // 🔥 Cria um novo registro caso não exista
-                        const newPrcing = this.prcingRepository.create({
-                            ativo: ativo,
-                            exage: exage,
-                            precing: parseFloat(item.lastPrice),
-                            type: 1, // Mercado futuro
-                            volum: validVolum,
-                            status: 1,
-                            created_at: currentTimestamp,
-                            updated_at: currentTimestamp,
-                        });
-                        await this.prcingRepository.save(newPrcing);
-                    }
-
-                    // 🔥 Verifica se já existe um registro no histórico para esse ativo na MEXC no mesmo minuto
-                    let existingHistory = await this.prcingHistoryRepository.findOne({
-                        where: { 
-                            ativo: { id: ativo.id }, 
-                            exage: { id: exage.id },
-                        },
-                        order: { timestamp: "DESC" } // 🔥 Pega o registro mais recente
-                    });
-
-                    if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== currentMinute) {
-                        // 🔥 Cria um novo registro no histórico apenas se não houver um registro do mesmo minuto
-                        const newHistory = this.prcingHistoryRepository.create({
-                            ativo: ativo,
-                            exage: exage,
-                            precing: parseFloat(item.lastPrice),
-                            timestamp: currentTimestamp,
-                        });
-                        await this.prcingHistoryRepository.save(newHistory);
-                    }
-
-                    return {
-                        pair: item.symbol.replace('_', '/'),
-                        last_price: item.lastPrice,
-                        highest_price_24h: item.highPrice24h,
-                        lowest_price_24h: item.lowPrice24h,
-                        funding_rate: item.fundingRate,
-                        change_24h: item.priceChangePercent,
-                        min_size: contractInfo.min_size,
-                        max_size: contractInfo.max_size,
-                        min_notional: contractInfo.min_notional,
-                        max_notional: contractInfo.max_notional,
-                    };
-                })
-            );
-
-            return futuresPrices.filter(price => price !== null);
-        } catch (error) {
-            console.error('❌ Erro ao buscar preços futuros da MEXC:', error.message);
+          this.logger.log('🔍 Buscando preços futuros da MEXC...');
+      
+          // 🔥 Buscar os nomes dos ativos cadastrados para reduzir a carga no banco
+          const ativos = await this.ativosRepository.find({ 
+            select: ['id', 'name'], 
+            where: { status: 1 } 
+          });
+      
+          if (ativos.length === 0) {
+            this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na MEXC.');
             return [];
+          }
+      
+          // 🔥 Criar um mapa de ativos para acesso rápido
+          const ativosMap = new Map(ativos.map(ativo => [ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'), ativo.id]));
+      
+          // 🔥 Buscar os preços dos ativos futuros na MEXC
+          const [pricesResponse, contractsResponse] = await Promise.all([
+            axios.get<{ data: { symbol: string; lastPrice: string; highPrice24h: string; lowPrice24h: string; fundingRate: string; priceChangePercent: string; }[] }>(this.mexcAPI),
+            axios.get<{ data: { symbol: string; minVol: string; maxVol: string; minAmount: string; maxAmount: string; }[] }>(this.mexcContractsAPI)
+          ]);
+      
+          const pricesData = pricesResponse.data.data || [];
+          const contractsData = contractsResponse.data.data || [];
+      
+          // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
+          const contractMap = new Map(contractsData.map(contract => [
+            contract.symbol, 
+            {
+              min_size: contract.minVol || "N/A",  
+              max_size: contract.maxVol || "N/A",  
+              min_notional: contract.minAmount || "N/A", 
+              max_notional: contract.maxAmount || "N/A"
+            }
+          ]));
+      
+          // 🔥 Buscar a exchange MEXC (evita busca repetitiva)
+          const exage = await this.exageRepository.findOne({ where: { id: 3 } });
+          if (!exage) {
+            this.logger.error('❌ Erro: Exchange MEXC não encontrada no banco de dados.');
+            return [];
+          }
+      
+          const now = new Date();
+          const currentMinute = now.getMinutes();
+      
+          // 🔥 Definir tipos explícitos para os arrays de batch
+          const bulkUpdates: { id: number; precing: number; volum: number; updated_at: Date }[] = [];
+          const bulkInserts: { ativo: { id: number }; exage: { id: number }; precing: number; type: number; volum: number; status: number; created_at: Date; updated_at: Date }[] = [];
+          const bulkHistory: { ativo: { id: number }; exage: { id: number }; precing: number; timestamp: Date }[] = [];
+      
+          for (const item of pricesData) {
+            const ativoId = ativosMap.get(item.symbol);
+            if (!ativoId) continue; // 🔥 Ignorar ativos não cadastrados
+      
+            const contractInfo = contractMap.get(item.symbol) || {
+              min_size: "N/A",
+              max_size: "N/A",
+              min_notional: "N/A",
+              max_notional: "N/A"
+            };
+      
+            const validVolum = parseFloat(contractInfo.max_notional) || 0;
+            const lastPrice = parseFloat(item.lastPrice) || 0;
+      
+            // 🔥 Verifica se já existe um registro na tabela `precings`
+            const existingPrcing = await this.prcingRepository.findOne({
+              select: ['id', 'precing', 'volum'],
+              where: { ativo: { id: ativoId }, exage: { id: exage.id } }
+            });
+      
+            if (existingPrcing) {
+              bulkUpdates.push({
+                id: existingPrcing.id,
+                precing: lastPrice,
+                volum: validVolum,
+                updated_at: now
+              });
+            } else {
+              bulkInserts.push({
+                ativo: { id: ativoId },
+                exage: { id: exage.id },
+                precing: lastPrice,
+                type: 1,
+                volum: validVolum,
+                status: 1,
+                created_at: now,
+                updated_at: now
+              });
+            }
+      
+            // 🔥 Verifica se já existe um registro no histórico para esse ativo na MEXC no mesmo minuto
+            const existingHistory = await this.prcingHistoryRepository.findOne({
+              where: { ativo: { id: ativoId }, exage: { id: exage.id } },
+              order: { timestamp: "DESC" }
+            });
+      
+            if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== currentMinute) {
+              bulkHistory.push({
+                ativo: { id: ativoId },
+                exage: { id: exage.id },
+                precing: lastPrice,
+                timestamp: now
+              });
+            }
+          }
+      
+          // 🔥 Realizar inserções e atualizações em batch para evitar carga excessiva no banco
+          if (bulkUpdates.length > 0) {
+            await this.prcingRepository.save(bulkUpdates);
+          }
+          if (bulkInserts.length > 0) {
+            await this.prcingRepository.save(bulkInserts);
+          }
+          if (bulkHistory.length > 0) {
+            await this.prcingHistoryRepository.save(bulkHistory);
+          }
+      
+          this.logger.log(`✅ Atualizados ${bulkUpdates.length}, Inseridos ${bulkInserts.length}, Histórico ${bulkHistory.length}`);
+      
+          return pricesData.map(item => ({
+            pair: item.symbol.replace('_', '/'),
+            last_price: item.lastPrice,
+            highest_price_24h: item.highPrice24h,
+            lowest_price_24h: item.lowPrice24h,
+            funding_rate: item.fundingRate,
+            change_24h: item.priceChangePercent,
+            min_size: contractMap.get(item.symbol)?.min_size || "N/A",
+            max_size: contractMap.get(item.symbol)?.max_size || "N/A",
+            min_notional: contractMap.get(item.symbol)?.min_notional || "N/A",
+            max_notional: contractMap.get(item.symbol)?.max_notional || "N/A"
+          }));
+        } catch (error) {
+          this.logger.error(`❌ Erro ao buscar preços futuros da MEXC: ${error.message}`);
+          return [];
         }
-    }
+      }
+      
+      
 
     async getBitgetFuturesPrices(): Promise<BitgetTicker[]> {
     const timestamp = String(Date.now());
@@ -608,55 +655,72 @@ export class ArbitrageService {
 
 
     async getArbitrageOpportunities(): Promise<any[]> {
-    try {
-      this.logger.log('🔍 Analisando oportunidades de arbitragem...');
-
-      const precings = await this.prcingRepository.find({
-        relations: ['ativo', 'exage'],
-      });
-
-      const precingsByAtivo: Record<string, any[]> = {};
-      precings.forEach((p) => {
-        const ativoName = p.ativo.name;
-        if (!precingsByAtivo[ativoName]) {
-          precingsByAtivo[ativoName] = [];
-        }
-        precingsByAtivo[ativoName].push(p);
-      });
-
-      const oportunidades: any[] = [];
-
-      for (const ativo in precingsByAtivo) {
-        const precings = precingsByAtivo[ativo];
-
-        const compra = precings.reduce((min, p) => (Number(p.precing) < Number(min.precing) ? p : min), precings[0]);
-        const venda = precings.reduce((max, p) => (Number(p.precing) > Number(max.precing) ? p : max), precings[0]);
-
-        if (compra && venda && Number(compra.precing) < Number(venda.precing)) {
-          const precoCompra = Number(compra.precing);
-          const precoVenda = Number(venda.precing);
-          const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
-
-          const atualizado = Math.floor((Date.now() - new Date(compra.updated_at).getTime()) / 1000);
-
-          oportunidades.push({
-            Moeda: ativo,
-            Compra: compra.exage.name,
-            Venda: venda.exage.name,
-            Precing_Compra: precoCompra.toFixed(4),
-            Precing_Venda: precoVenda.toFixed(4),
-            Spread: spread.toFixed(2) + '%',
-            Atualizado: atualizado + ' segundos atrás',
+        try {
+          this.logger.log('🔍 Analisando oportunidades de arbitragem...');
+      
+          // 🔥 Buscar apenas os dados essenciais do banco para reduzir a carga
+          const precings = await this.prcingRepository.find({
+            select: ['precing', 'updated_at'],
+            relations: ['ativo', 'exage'],
           });
+      
+          if (precings.length === 0) {
+            this.logger.warn('⚠️ Nenhum dado de preço disponível para análise.');
+            return [];
+          }
+      
+          const precingsByAtivo = new Map<string, any[]>();
+          for (const p of precings) {
+            const ativoName = p.ativo.name;
+            if (!precingsByAtivo.has(ativoName)) {
+              precingsByAtivo.set(ativoName, []);
+            }
+            precingsByAtivo.get(ativoName)!.push(p);
+          }
+      
+          const oportunidades: any[] = [];
+          const agora = Date.now(); // Calcula apenas uma vez
+      
+          for (const [ativo, precings] of precingsByAtivo.entries()) {
+            if (precings.length < 2) continue; // Ignora ativos sem ao menos 2 preços
+      
+            // 🔥 Encontrar menor (compra) e maior (venda) preço de forma eficiente
+            let compra = precings[0];
+            let venda = precings[0];
+      
+            for (const p of precings) {
+              if (Number(p.precing) < Number(compra.precing)) compra = p;
+              if (Number(p.precing) > Number(venda.precing)) venda = p;
+            }
+      
+            // 🔥 Se não há spread positivo, ignora a oportunidade
+            if (Number(compra.precing) >= Number(venda.precing)) continue;
+      
+            const precoCompra = Number(compra.precing);
+            const precoVenda = Number(venda.precing);
+            const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
+      
+            // 🔥 Calcula a atualização apenas uma vez
+            const atualizado = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
+      
+            oportunidades.push({
+              Moeda: ativo,
+              Compra: compra.exage.name,
+              Venda: venda.exage.name,
+              Precing_Compra: precoCompra.toFixed(4),
+              Precing_Venda: precoVenda.toFixed(4),
+              Spread: spread.toFixed(2) + '%',
+              Atualizado: `${atualizado} segundos atrás`,
+            });
+          }
+      
+          this.logger.log(`✅ Oportunidades encontradas: ${oportunidades.length}`);
+          return oportunidades;
+        } catch (error) {
+          this.logger.error(`❌ Erro ao calcular oportunidades de arbitragem: ${error.message}`);
+          return [];
         }
       }
-
-      return oportunidades;
-    } catch (error) {
-      this.logger.error('❌ Erro ao calcular oportunidades de arbitragem:', error.message);
-      return [];
-    }
-  }
 
     async analisarArbitragemEntreCorretorasRealtime(ativo: string, longExage: string, shortExage: string): Promise<any> {
     try {
