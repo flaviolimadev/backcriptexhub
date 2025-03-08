@@ -77,6 +77,11 @@ export interface BinancePrice {  // 🔥 Adicionando 'export' para tornar acess�
   min_notional: string;
 }
 
+interface BinanceContract {
+    symbol: string;
+    filters: { filterType: string; minQty?: string; maxQty?: string; notional?: string }[];
+  }
+
 // 🔥 Configuração das credenciais da Bitget (adicione ao .env)
 const BITGET_API_KEY = process.env.BITGET_API_KEY;
 const BITGET_SECRET_KEY = process.env.BITGET_SECRET_KEY;
@@ -194,7 +199,7 @@ export class ArbitrageService {
     return opportunities;
     }
 
-    @Cron('*/15 * * * * *')  // Executa a cada 20 segundos
+    @Cron('*/40 * * * * *')  // Executa a cada 20 segundos
     async getGateIoFuturesPrices(): Promise<any[]> {
     try {
         // 🔥 Buscar os ativos cadastrados no banco de dados
@@ -313,7 +318,7 @@ export class ArbitrageService {
     } 
     }
 
-    @Cron('*/15 * * * * *')  // Executa a cada 20 segundos
+    @Cron('*/41 * * * * *')  // Executa a cada 20 segundos
     async getMexcFuturesPrices(): Promise<any[]> {
         try {
             // 🔥 Buscar os ativos cadastrados no banco de dados
@@ -464,104 +469,82 @@ export class ArbitrageService {
     }
 
     @Cron('*/60 * * * * *')  // 🔥 Executa a cada 15 segundos
-  async getBinanceFuturesPrices(): Promise<void> {
-    try {
-      this.logger.log('🔍 Buscando preços da Binance...');
-
-      const axiosConfig = {
-        httpsAgent: proxyAgent,
-        timeout: 15000,
-      };
-
-      const [ativos, exages, response, contractsResponse] = await Promise.all([
-        this.ativosRepository.find({ where: { status: 1 } }),
-        this.exageRepository.find(),
-        axios.get(this.binanceFuturesAPI, axiosConfig),
-        axios.get(this.binanceContractsAPI, axiosConfig),
-      ]);
-
-      const ativosMap = new Map(ativos.map(a => [a.name, a]));
-      const exage = exages.find(e => e.id === 1);
-
-      if (!exage) {
-        this.logger.error('❌ Corretora Binance não encontrada!');
-        return;
-      }
-
-      const contractMap = new Map(
-        contractsResponse.data.symbols.map(contract => [
-          contract.symbol,
-          {
-            min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
-            max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
-            min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
-          },
-        ])
-      );
-
-      const pricesData = Array.isArray(response.data) ? response.data : [];
-
-      const bulkUpdates = [];
-      const bulkInserts = [];
-      const bulkHistory = [];
-      const now = new Date();
-
-      for (const item of pricesData) {
-        const ativo = ativosMap.get(item.symbol);
-
-        if (!ativo) continue;
-
-        const contractInfo = contractMap.get(item.symbol) || {};
-        const validVolum = parseFloat(contractInfo.min_notional || '0') || 0;
-
-        const existingPrcing = await this.prcingRepository.findOne({
-          where: { ativo: { id: ativo.id }, exage: { id: exage.id } },
-        });
-
-        if (existingPrcing) {
-          bulkUpdates.push({
-            id: existingPrcing.id,
-            precing: parseFloat(item.lastPrice),
-            volum: validVolum,
-            updated_at: now,
-          });
-        } else {
-          bulkInserts.push({
-            ativo,
-            exage,
-            precing: parseFloat(item.lastPrice),
-            type: 1,
-            volum: validVolum,
-            status: 1,
-            created_at: now,
-            updated_at: now,
-          });
+    async getBinanceFuturesPrices(): Promise<BinancePrice[]> {
+        try {
+          this.logger.log('🔍 Buscando preços da Binance...');
+    
+          const axiosConfig = {
+            httpsAgent: proxyAgent,
+            timeout: 15000,
+          };
+    
+          const [ativos, exages, response, contractsResponse] = await Promise.all([
+            this.ativosRepository.find({ where: { status: 1 } }),
+            this.exageRepository.find(),
+            axios.get(this.binanceFuturesAPI, axiosConfig),
+            axios.get(this.binanceContractsAPI, axiosConfig),
+          ]);
+    
+          if (!Array.isArray(response.data)) {
+            throw new Error('Dados da Binance não estão no formato esperado.');
+          }
+    
+          const ativosMap = new Map(ativos.map(a => [a.name, a]));
+          const exage = exages.find(e => e.id === 1);
+    
+          if (!exage) {
+            this.logger.error('❌ Corretora Binance não encontrada!');
+            return [];
+          }
+    
+          const contractsData = contractsResponse.data as { symbols: BinanceContract[] };
+          const contractMap = new Map(
+            contractsData.symbols.map(contract => [
+              contract.symbol,
+              {
+                min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
+                max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
+                min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
+              } as BinanceContractInfo,
+            ])
+          );
+    
+          const pricesData = response.data;
+          const processedData: BinancePrice[] = [];
+          const now = new Date();
+    
+          for (const item of pricesData) {
+            const ativo = ativosMap.get(item.symbol);
+            if (!ativo) continue;
+    
+            const contractInfo = contractMap.get(item.symbol) || {
+              min_size: "N/A",
+              max_size: "N/A",
+              min_notional: "N/A",
+            };
+    
+            processedData.push({
+              pair: item.symbol,
+              last_price: item.lastPrice,
+              highest_price_24h: item.highPrice,
+              lowest_price_24h: item.lowPrice,
+              funding_rate: item.fundingRate || "N/A",
+              change_24h: item.priceChangePercent,
+              min_size: contractInfo.min_size,
+              max_size: contractInfo.max_size,
+              min_notional: contractInfo.min_notional,
+            });
+          }
+    
+          this.logger.log(`✅ Preços da Binance atualizados (${processedData.length} ativos processados).`);
+          return processedData;
+        } catch (error) {
+          this.logger.error(`❌ Erro ao buscar preços da Binance: ${error.message}`);
+          return [];
         }
-
-        bulkHistory.push({
-          ativo,
-          exage,
-          precing: parseFloat(item.lastPrice),
-          timestamp: now,
-        });
       }
 
-      if (bulkUpdates.length > 0) {
-        await this.prcingRepository.save(bulkUpdates);
-      }
-      if (bulkInserts.length > 0) {
-        await this.prcingRepository.save(this.prcingRepository.create(bulkInserts));
-      }
-      if (bulkHistory.length > 0) {
-        await this.prcingHistoryRepository.save(this.prcingHistoryRepository.create(bulkHistory));
-      }
 
-      this.logger.log(`✅ Atualização concluída (${bulkUpdates.length} atualizados, ${bulkInserts.length} inseridos).`);
-
-    } catch (error) {
-      this.logger.error(`❌ Erro ao buscar preços da Binance: ${error.message}`);
-    }
-  }
     async getHtxFuturesPrices(): Promise<any[]> {
     try {
         console.log('🔍 Buscando preços da HTX (Huobi Futuros USDT-M)...');
@@ -907,14 +890,5 @@ export class ArbitrageService {
         return [];
     }
     }
-
-
-
-
-
-
-
-
-
   
 }
