@@ -729,24 +729,28 @@ export class ArbitrageService {
 
 
     // 🔥 Função auxiliar para gerar os links dinâmicos das corretoras
-  private generateExchangeLink(exchange: string, ativo: string): string {
-    const formattedAtivo = ativo.replace('/', '').toUpperCase(); // 🔄 Formatação do ativo (ex: BTC/USDT → BTCUSDT)
-    const formattedGateAtivo = formattedAtivo.replace('USDT', 'USD'); // 🔄 Formatação específica para Gate.io
-
-    const exchangeLinks: { [key: string]: string } = {
-        'Binance': `https://www.binance.com/en/futures/${formattedAtivo}`,
-        'Kraken': `https://futures.kraken.com/trade/${formattedAtivo}`,
-        'Coinbase': `https://pro.coinbase.com/trade/${formattedAtivo}`,
-        'KuCoin': `https://www.kucoin.com/futures/${formattedAtivo}`,
-        'Bybit': `https://www.bybit.com/en-US/trade/${formattedAtivo}`,
-        'Bitget': `https://www.bitget.com/en/contract/${formattedAtivo}`,
-        'Gate.io': `https://www.gate.io/pt/futures/${formattedGateAtivo.split('USD')[0]}/${formattedGateAtivo}`, // ✅ Formato correto
-        'MEXC': `https://futures.mexc.com/exchange/${formattedAtivo}`,
-        'HTX': `https://www.huobi.com/en-us/futures/${formattedAtivo}`,
-    };
-
-    return exchangeLinks[exchange] || 'https://www.google.com/search?q=' + formattedAtivo; // 🔍 Link de fallback
-  }
+    private generateExchangeLink(exchange: string, ativo: string): string {
+      const formattedAtivo = ativo.replace('/', '').toUpperCase(); // 🔄 Formatação do ativo (ex: BTC/USDT → BTCUSDT)
+      
+      // 🔄 Formatação específica para cada corretora
+      const formattedGateAtivo = formattedAtivo.replace('USDT', '_USDT'); // Gate.io usa "SWGT_USDT"
+      const formattedBitgetAtivo = formattedAtivo.replace('USDT', 'USDT_UMCBL'); // Bitget usa "BTCUSDT_UMCBL"
+  
+      const exchangeLinks: { [key: string]: string } = {
+          'Binance': `https://www.binance.com/en/futures/${formattedAtivo}`,
+          'Kraken': `https://futures.kraken.com/trade/${formattedAtivo}`,
+          'Coinbase': `https://pro.coinbase.com/trade/${formattedAtivo}`,
+          'KuCoin': `https://www.kucoin.com/futures/${formattedAtivo}`,
+          'Bybit': `https://www.bybit.com/en-US/trade/${formattedAtivo}`,
+          'Bitget': `https://www.bitget.com/en/contract/${formattedBitgetAtivo}`,
+          'Gate.io': `https://www.gate.io/pt/trade/${formattedGateAtivo}`, // ✅ Agora no formato correto
+          'MEXC': `https://futures.mexc.com/exchange/${formattedGateAtivo}`,
+          'HTX': `https://www.huobi.com/en-us/futures/${formattedAtivo}`,
+      };
+  
+      return exchangeLinks[exchange] || `https://www.google.com/search?q=${formattedAtivo}`; // 🔍 Link de fallback
+    }
+  
 
     async analisarArbitragemEntreCorretorasRealtime(ativo: string, longExage: string, shortExage: string): Promise<any> {
     try {

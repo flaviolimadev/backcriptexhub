@@ -46,4 +46,12 @@ export class EstrategiaService {
     // 💾 Salvar no banco de dados
     return await this.estrategiaRepository.save(estrategia);
   }
+
+  async getUserEstrategias(userId: number) {
+    return await this.estrategiaRepository.find({
+      where: { user: { id: userId }, status: 1 }, // ✅ Referenciando a entidade `User`
+      relations: ['user'], // ✅ Para trazer os dados do usuário
+      order: { id: 'DESC' }, // ✅ Ordenação por ID (mais recentes primeiro)
+    });
+  }
 }

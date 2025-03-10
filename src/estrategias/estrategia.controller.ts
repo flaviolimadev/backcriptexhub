@@ -1,4 +1,4 @@
-import { Controller, Post, Put, Body, Param } from '@nestjs/common';
+import { Controller, Post, Put,Get, Body, Param } from '@nestjs/common';
 import { EstrategiaService } from './estrategia.service';
 
 @Controller('estrategias')
@@ -22,5 +22,11 @@ export class EstrategiaController {
     } catch (error) {
         return { error: error.message };
     }
-    }
+  }
+
+  // ✅ Retornar todas as estratégias de um usuário específico SEM autenticação
+  @Get('/user/:userId')
+  async getUserStrategies(@Param('userId') userId: number) {
+    return await this.estrategiaService.getUserEstrategias(userId);
+  }
 }

@@ -63,12 +63,12 @@ export class PrcingHistoryService {
             this.prcingHistoryRepository.find({
                 where: { ativo: { id: ativo.id }, exage: { id: exage1.id } },
                 order: { timestamp: 'DESC' },
-                take: 50, // 🔥 Limita a 50 registros
+                take: 500, // 🔥 Limita a 50 registros
             }),
             this.prcingHistoryRepository.find({
                 where: { ativo: { id: ativo.id }, exage: { id: exage2.id } },
                 order: { timestamp: 'DESC' },
-                take: 50, // 🔥 Limita a 50 registros
+                take: 500, // 🔥 Limita a 50 registros
             }),
         ]);
 

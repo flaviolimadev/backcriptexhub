@@ -1,6 +1,7 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 import { Estrategia } from '../estrategias/entities/estrategia.entity';
 import { OneToMany } from 'typeorm';
+import { AcoesComentario } from '../acoes_comentario/entities/acoes_comentario.entity';
 
 @Entity()
 export class User {
@@ -55,4 +56,7 @@ export class User {
   // Dentro da classe `User`
   @OneToMany(() => Estrategia, (estrategia) => estrategia.user)
   estrategias: Estrategia[];
+
+  @OneToMany(() => AcoesComentario, (acao) => acao.user)
+  acoesComentario: AcoesComentario[]; // 🔥 Adicionando a relação correta
 }
