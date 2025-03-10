@@ -19,4 +19,14 @@ export class PrcingHistoryController {
     ) {
         return await this.prcingHistoryService.getHistoryByAssetAndExchange(ativoId, exageId);
     }
+
+    // 🔥 Rota para buscar os 50 últimos históricos de um ativo em duas exchanges diferentes pelo nome
+    @Get(':ativoName/:exageName1/:exageName2')
+    async getComparisonHistory(
+        @Param('ativoName') ativoName: string,
+        @Param('exageName1') exageName1: string,
+        @Param('exageName2') exageName2: string,
+    ) {
+        return await this.prcingHistoryService.getComparisonHistory(ativoName, exageName1, exageName2);
+    }
 }

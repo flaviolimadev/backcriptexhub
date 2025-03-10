@@ -1,4 +1,6 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Estrategia } from '../estrategias/entities/estrategia.entity';
+import { OneToMany } from 'typeorm';
 
 @Entity()
 export class User {
@@ -49,4 +51,8 @@ export class User {
 
   @UpdateDateColumn()
   updated_at: Date;
+
+  // Dentro da classe `User`
+  @OneToMany(() => Estrategia, (estrategia) => estrategia.user)
+  estrategias: Estrategia[];
 }

@@ -9,6 +9,7 @@ import { AtivosModule } from './ativos/ativos.module';
 import { ExagesModule } from "./exages/exages.module";
 import { PrecingsModule } from "./precing/precings.module";
 import { ScheduleModule } from '@nestjs/schedule'; // 📌 Importação do módulo de agendamento
+import { EstrategiaModule } from './estrategias/estrategia.module';
 
 @Module({
   imports: [
@@ -27,7 +28,8 @@ import { ScheduleModule } from '@nestjs/schedule'; // 📌 Importação do módu
     ArbitrageModule,
     AtivosModule,
     ExagesModule,
-    PrecingsModule
+    PrecingsModule,
+    EstrategiaModule
   ],
   controllers: [AppController],
   providers: [AppService],
