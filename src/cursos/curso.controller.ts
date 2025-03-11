@@ -35,4 +35,10 @@ export class CursoController {
   async deleteCurso(@Param('id') id: number) {
     return await this.cursoService.deleteCurso(id);
   }
+
+   // 🔥 Rota que retorna a lista de todos os cursos + progresso do usuário
+   @Get('progresso/:user_id')
+   async getCursosComProgresso(@Param('user_id') userId: number) {
+     return await this.cursoService.getCursosComProgresso(userId);
+   }
 }

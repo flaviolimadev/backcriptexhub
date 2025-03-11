@@ -72,4 +72,13 @@ export class AulaController {
   async delete(@Param('id') id: number) {
     return await this.aulaService.deleteAula(id);
   }
+
+  // 🔥 Rota para obter detalhes da aula com base no usuário
+  @Get('detalhes/:user_id/:aula_id')
+  async getAulaDetalhes(
+    @Param('user_id') userId: number,
+    @Param('aula_id') aulaId: number
+  ) {
+    return await this.aulaService.getAulaDetalhes(userId, aulaId);
+  }
 }
