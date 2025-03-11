@@ -115,56 +115,76 @@ export class AulaService {
 
   async getAulaDetalhes(userId: number, aulaId: number) {
     console.log(`🔍 Buscando detalhes da aula ID: ${aulaId} para o usuário ID: ${userId}`);
-  
+
     // 🔍 Buscar a aula com seus relacionamentos
     const aula = await this.aulaRepository.findOne({
-      where: { id: aulaId },
-      relations: ['modulo', 'modulo.curso'],
+        where: { id: aulaId },
+        relations: ['modulo', 'modulo.curso'],
     });
-  
+
     if (!aula) {
-      console.error(`❌ Aula com ID ${aulaId} não encontrada.`);
-      throw new Error('Erro ao buscar detalhes da aula: Aula não encontrada.');
+        console.error(`❌ Aula com ID ${aulaId} não encontrada.`);
+        throw new Error('Erro ao buscar detalhes da aula: Aula não encontrada.');
     }
-  
+
     // 🔍 Buscar comentários da aula
     const comentarios = await this.comentarioRepository.find({
-      where: { aula: { id: aulaId } },
-      relations: ['user'],
+        where: { aula: { id: aulaId } },
+        relations: ['user'],
     });
-  
+
     // 🔍 Buscar total de curtidas na aula
     const totalCurtidas = await this.acoesAulaRepository.count({
-      where: { aula: { id: aulaId }, like: true },
+        where: { aula: { id: aulaId }, like: true },
     });
-  
+
     // 🔍 Buscar ações do usuário na aula
     const acoesUsuario = await this.acoesAulaRepository.findOne({
-      where: { aula: { id: aulaId }, user: { id: userId } },
+        where: { aula: { id: aulaId }, user: { id: userId } },
     });
-  
-    // 🔍 Buscar módulos do curso
+
+    // 🔍 Buscar módulos do curso com todas as aulas de cada módulo
     const modulos = await this.moduloRepository.find({
-      where: { curso: { id: aula.modulo.curso.id } },
+        where: { curso: { id: aula.modulo.curso.id } },
+        relations: ['aulas'], // Adiciona as aulas dentro de cada módulo
     });
-  
+
     console.log(`✅ Aula encontrada:`, aula);
-  
+
     return {
-      aula,
-      comentarios: comentarios.map((comentario) => ({
-        id: comentario.id,
-        texto: comentario.comentario,
-        usuario: comentario.user ? comentario.user.first_name : 'Usuário desconhecido',
-      })),
-      totalCurtidas,
-      acoesUsuario: acoesUsuario || {
-        like: false,
-        finalizada: false,
-        save: false,
-      },
-      curso: aula.modulo.curso,
-      modulos,
+        aula,
+        comentarios: comentarios.map((comentario) => ({
+            id: comentario.id,
+            texto: comentario.comentario,
+            usuario: comentario.user ? comentario.user.first_name : 'Usuário desconhecido',
+        })),
+        totalCurtidas,
+        acoesUsuario: acoesUsuario || {
+            like: false,
+            finalizada: false,
+            save: false,
+        },
+        curso: aula.modulo.curso,
+        modulos: modulos.map((modulo) => ({
+            id: modulo.id,
+            name: modulo.name,
+            descricao: modulo.descricao,
+            avatar: modulo.avatar,
+            status: modulo.status,
+            libera_em: modulo.libera_em,
+            garantia: modulo.garantia,
+            aulas: modulo.aulas.map((aula) => ({
+                id: aula.id,
+                name: aula.name,
+                descricao: aula.descricao,
+                link: aula.link,
+                avatar: aula.avatar,
+                status: aula.status,
+                libera_em: aula.libera_em,
+                garantia: aula.garantia,
+            })),
+        })),
     };
-  }
+}
+
 }
