@@ -182,6 +182,7 @@ export class AulaService {
             return {
                 id: comentario.id,
                 texto: comentario.comentario,
+                type: comentario.type,
                 usuario: comentario.user ? comentario.user.first_name : 'Usuário desconhecido',
                 acoes: acoes.map((acao) => ({
                     userId: acao.user.id,

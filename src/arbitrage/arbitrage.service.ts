@@ -11,6 +11,7 @@ import { PrcingHistoryService } from '../precingHistory/prcingHistory.service';
 import { PrcingHistory } from '../precingHistory/prcingHistory.entity'; // 🔥 Importando a entidade
 import { HttpsProxyAgent } from 'https-proxy-agent'; // 🔥 Suporte a proxy
 import { Cron } from '@nestjs/schedule';
+import * as https from 'https';
 
 dotenv.config();
 
@@ -199,288 +200,344 @@ export class ArbitrageService {
     return opportunities;
     }
 
-    @Cron('*/40 * * * * *')  // Executa a cada 20 segundos
+    @Cron('*/30 * * * * *')  // 🔥 Executa a cada 30 segundos
     async getGateIoFuturesPrices(): Promise<any[]> {
         try {
-          this.logger.log('🔍 Buscando preços futuros da Gate.io...');
-      
-          // 🔥 Buscar os ativos cadastrados no banco de dados (somente ID e nome para reduzir carga)
-          const ativos = await this.ativosRepository.find({ 
-            select: ['id', 'name'], 
-            where: { status: 1 } 
-          });
-      
-          if (ativos.length === 0) {
-            this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na Gate.io.');
-            return [];
-          }
-      
-          // 🔥 Criar um mapa de ativos para acesso rápido
-          const ativosMap = new Map(ativos.map(ativo => [ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'), ativo.id]));
-      
-          // 🔥 Buscar as APIs da Gate.io em paralelo
-          const [pricesResponse, contractsResponse] = await Promise.all([
-            axios.get<{ contract: string; last: string; highest_price_24h: string; lowest_price_24h: string; funding_rate: string; change_percent: string; }[]>(this.gateIoAPI),
-            axios.get<{ name: string; order_size_min: string; order_size_max: string; order_value_min: string; order_value_max: string; }[]>(this.gateIoContractsAPI)
-          ]);
-      
-          const pricesData = pricesResponse.data || [];
-          const contractsData = contractsResponse.data || [];
-      
-          // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-          const contractMap = new Map(contractsData.map(contract => [
-            contract.name, 
-            {
-              min_size: contract.order_size_min || "N/A",  
-              max_size: contract.order_size_max || "N/A",  
-              min_notional: contract.order_value_min || "N/A", 
-              max_notional: contract.order_value_max || "N/A"
-            }
-          ]));
-      
-          // 🔥 Buscar a exchange Gate.io (evita busca repetitiva)
-          const exage = await this.exageRepository.findOne({ where: { id: 2 } });
-          if (!exage) {
-            this.logger.error('❌ Erro: Exchange Gate.io não encontrada no banco de dados.');
-            return [];
-          }
-      
-          const now = new Date();
-          now.setSeconds(0, 0); // Remove segundos e milissegundos para agrupar por minuto
-      
-          // 🔥 Definir tipos explícitos para os arrays de batch
-          const bulkUpdates: { id: number; precing: number; volum: number; updated_at: Date }[] = [];
-          const bulkInserts: { ativo: { id: number }; exage: { id: number }; precing: number; type: number; volum: number; status: number; created_at: Date; updated_at: Date }[] = [];
-          const bulkHistory: { ativo: { id: number }; exage: { id: number }; precing: number; timestamp: Date }[] = [];
-      
-          for (const item of pricesData) {
-            const ativoId = ativosMap.get(item.contract);
-            if (!ativoId) continue; // 🔥 Ignorar ativos não cadastrados
-      
-            const contractInfo = contractMap.get(item.contract) || {
-              min_size: "N/A",
-              max_size: "N/A",
-              min_notional: "N/A",
-              max_notional: "N/A"
+            this.logger.log('🔍 Buscando preços futuros da Gate.io...');
+
+            const axiosConfig = {
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000,
             };
-      
-            const validVolum = parseFloat(contractInfo.max_notional) || 0;
-            const lastPrice = parseFloat(item.last) || 0;
-      
-            // 🔥 Verifica se já existe um registro na tabela `precings`
-            const existingPrcing = await this.prcingRepository.findOne({
-              select: ['id', 'precing', 'volum'],
-              where: { ativo: { id: ativoId }, exage: { id: exage.id } }
+
+            // 🔥 Buscar os ativos cadastrados no banco de dados
+            const ativos = await this.ativosRepository.find({ 
+                select: ['id', 'name'], 
+                where: { status: 1 } 
             });
-      
-            if (existingPrcing) {
-              bulkUpdates.push({
-                id: existingPrcing.id,
-                precing: lastPrice,
-                volum: validVolum,
-                updated_at: now
-              });
-            } else {
-              bulkInserts.push({
-                ativo: { id: ativoId },
-                exage: { id: exage.id },
-                precing: lastPrice,
-                type: 1,
-                volum: validVolum,
-                status: 1,
-                created_at: now,
-                updated_at: now
-              });
+
+            if (ativos.length === 0) {
+                this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na Gate.io.');
+                return [];
             }
-      
-            // 🔥 Verifica se já existe um registro no histórico para esse ativo na Gate.io no mesmo minuto
-            const existingHistory = await this.prcingHistoryRepository.findOne({
-              where: { ativo: { id: ativoId }, exage: { id: exage.id } },
-              order: { timestamp: "DESC" }
-            });
-      
-            if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== now.getMinutes()) {
-              bulkHistory.push({
-                ativo: { id: ativoId },
-                exage: { id: exage.id },
-                precing: lastPrice,
-                timestamp: now
-              });
+
+            // 🔥 Criar um mapa de ativos para acesso rápido
+            const ativosMap = new Map(ativos.map(ativo => [ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'), ativo.id]));
+
+            // 🔥 Buscar as APIs da Gate.io em paralelo
+            const [pricesResponse, contractsResponse] = await Promise.all([
+                axios.get<{ contract: string; last: string; highest_price_24h: string; lowest_price_24h: string; funding_rate: string; change_percent: string; volume: string; }[]>(this.gateIoAPI, axiosConfig),
+                axios.get<{ name: string; order_size_min: string; order_size_max: string; order_value_min: string; order_value_max: string; }[]>(this.gateIoContractsAPI, axiosConfig)
+            ]);
+
+            const pricesData = pricesResponse.data || [];
+            const contractsData = contractsResponse.data || [];
+
+            // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
+            const contractMap = new Map(contractsData.map(contract => [
+                contract.name, 
+                {
+                    min_size: contract.order_size_min || "N/A",  
+                    max_size: contract.order_size_max || "N/A",  
+                    min_notional: contract.order_value_min || "N/A", 
+                    max_notional: contract.order_value_max || "N/A"
+                }
+            ]));
+
+            // 🔥 Buscar a exchange Gate.io
+            const exage = await this.exageRepository.findOne({ where: { id: 2 } });
+            if (!exage) {
+                this.logger.error('❌ Erro: Exchange Gate.io não encontrada no banco de dados.');
+                return [];
             }
-          }
-      
-          // 🔥 Realizar inserções e atualizações em batch para evitar carga excessiva no banco
-          if (bulkUpdates.length > 0) {
-            await this.prcingRepository.save(bulkUpdates);
-          }
-          if (bulkInserts.length > 0) {
-            await this.prcingRepository.save(bulkInserts);
-          }
-          if (bulkHistory.length > 0) {
-            await this.prcingHistoryRepository.save(bulkHistory);
-          }
-      
-          this.logger.log(`✅ Atualizados ${bulkUpdates.length}, Inseridos ${bulkInserts.length}, Histórico ${bulkHistory.length}`);
-      
-          return pricesData.map(item => ({
-            pair: item.contract.replace('_', '/'),
-            last_price: item.last,
-            highest_price_24h: item.highest_price_24h,
-            lowest_price_24h: item.lowest_price_24h,
-            funding_rate: item.funding_rate,
-            change_24h: item.change_percent,
-            min_size: contractMap.get(item.contract)?.min_size || "N/A",
-            max_size: contractMap.get(item.contract)?.max_size || "N/A",
-            min_notional: contractMap.get(item.contract)?.min_notional || "N/A",
-            max_notional: contractMap.get(item.contract)?.max_notional || "N/A"
-          }));
+
+            const now = new Date();
+            now.setSeconds(0, 0); // Remove segundos e milissegundos para agrupar por minuto
+
+            const batchSize = 10;
+            const priceChunks: any[][] = [];
+
+            for (let i = 0; i < pricesData.length; i += batchSize) {
+                priceChunks.push(pricesData.slice(i, i + batchSize));
+            }
+
+            for (const chunk of priceChunks) {
+                const bulkUpdates: Array<{ id: number; precing: number; volum: number; updated_at: Date }> = [];
+                const bulkInserts: Array<{ ativo: { id: number }; exage: { id: number }; precing: number; type: number; volum: number; status: number; created_at: Date; updated_at: Date }> = [];
+                const bulkHistoryUpdates: Array<{ id: number; precing: number; volum: number; timestamp: Date }> = [];
+                const bulkHistoryInserts: Array<{ ativo: { id: number }; exage: { id: number }; precing: number; volum: number; timestamp: Date }> = [];
+
+                await Promise.all(
+                    chunk.map(async (item: any) => {
+                        const ativoId = ativosMap.get(item.contract);
+                        if (!ativoId) {
+                            console.log(`⚠️ Ativo ${item.contract} não encontrado no banco.`);
+                            return;
+                        }
+
+                        console.log(`📌 Processando ${item.contract}`);
+
+                        const lastPrice = parseFloat(item.last) || 0;
+                        const volum = parseFloat(item.volume) || 0;
+
+                        const contractInfo = contractMap.get(item.contract) || {
+                            min_size: "N/A",
+                            max_size: "N/A",
+                            min_notional: "N/A",
+                            max_notional: "N/A"
+                        };
+
+                        const existingPrcing = await this.prcingRepository.findOne({
+                            select: ['id', 'precing'],
+                            where: { ativo: { id: ativoId }, exage: { id: exage.id } },
+                        });
+
+                        if (existingPrcing) {
+                            bulkUpdates.push({
+                                id: existingPrcing.id,
+                                precing: lastPrice,
+                                volum,
+                                updated_at: now,
+                            });
+                        } else {
+                            bulkInserts.push({
+                                ativo: { id: ativoId },
+                                exage: { id: exage.id },
+                                precing: lastPrice,
+                                type: 1,
+                                volum,
+                                status: 1,
+                                created_at: now,
+                                updated_at: now,
+                            });
+                        }
+
+                        const existingHistory = await this.prcingHistoryRepository.findOne({
+                            where: { ativo: { id: ativoId }, exage: { id: exage.id }, timestamp: now },
+                        });
+
+                        if (existingHistory) {
+                            bulkHistoryUpdates.push({
+                                id: existingHistory.id,
+                                precing: lastPrice,
+                                volum,
+                                timestamp: now,
+                            });
+                        } else {
+                            bulkHistoryInserts.push({
+                                ativo: { id: ativoId },
+                                exage: { id: exage.id },
+                                precing: lastPrice,
+                                volum,
+                                timestamp: now,
+                            });
+                        }
+                    })
+                );
+
+                if (bulkUpdates.length > 0) {
+                    await this.prcingRepository.save(bulkUpdates);
+                }
+                if (bulkInserts.length > 0) {
+                    await this.prcingRepository.save(bulkInserts);
+                }
+                if (bulkHistoryUpdates.length > 0) {
+                    await this.prcingHistoryRepository.save(bulkHistoryUpdates);
+                }
+                if (bulkHistoryInserts.length > 0) {
+                    await this.prcingHistoryRepository.save(bulkHistoryInserts);
+                }
+
+                this.logger.log(`✅ Gate.io: Atualizados ${bulkUpdates.length}, Inseridos ${bulkInserts.length}, Histórico Atualizados ${bulkHistoryUpdates.length}, Histórico Inseridos ${bulkHistoryInserts.length}`);
+            }
+
+            return pricesData.map(item => ({
+                pair: item.contract.replace('_', '/'),
+                last_price: item.last,
+                highest_price_24h: item.highest_price_24h,
+                lowest_price_24h: item.lowest_price_24h,
+                funding_rate: item.funding_rate,
+                change_24h: item.change_percent,
+                min_size: contractMap.get(item.contract)?.min_size || "N/A",
+                max_size: contractMap.get(item.contract)?.max_size || "N/A",
+                min_notional: contractMap.get(item.contract)?.min_notional || "N/A",
+                max_notional: contractMap.get(item.contract)?.max_notional || "N/A"
+            }));
         } catch (error) {
-          this.logger.error(`❌ Erro ao buscar preços futuros da Gate.io: ${error.message}`);
-          return [];
+            this.logger.error(`❌ Erro ao buscar preços futuros da Gate.io: ${error.message}`);
+            return [];
         }
-      }
+    }
       
 
-    @Cron('*/41 * * * * *')  // Executa a cada 20 segundos
+    @Cron('*/30 * * * * *')  // 🔥 Executa a cada 30 segundos
     async getMexcFuturesPrices(): Promise<any[]> {
         try {
-          this.logger.log('🔍 Buscando preços futuros da MEXC...');
-      
-          // 🔥 Buscar os nomes dos ativos cadastrados para reduzir a carga no banco
-          const ativos = await this.ativosRepository.find({ 
-            select: ['id', 'name'], 
-            where: { status: 1 } 
-          });
-      
-          if (ativos.length === 0) {
-            this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na MEXC.');
-            return [];
-          }
-      
-          // 🔥 Criar um mapa de ativos para acesso rápido
-          const ativosMap = new Map(ativos.map(ativo => [ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'), ativo.id]));
-      
-          // 🔥 Buscar os preços dos ativos futuros na MEXC
-          const [pricesResponse, contractsResponse] = await Promise.all([
-            axios.get<{ data: { symbol: string; lastPrice: string; highPrice24h: string; lowPrice24h: string; fundingRate: string; priceChangePercent: string; }[] }>(this.mexcAPI),
-            axios.get<{ data: { symbol: string; minVol: string; maxVol: string; minAmount: string; maxAmount: string; }[] }>(this.mexcContractsAPI)
-          ]);
-      
-          const pricesData = pricesResponse.data.data || [];
-          const contractsData = contractsResponse.data.data || [];
-      
-          // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-          const contractMap = new Map(contractsData.map(contract => [
-            contract.symbol, 
-            {
-              min_size: contract.minVol || "N/A",  
-              max_size: contract.maxVol || "N/A",  
-              min_notional: contract.minAmount || "N/A", 
-              max_notional: contract.maxAmount || "N/A"
-            }
-          ]));
-      
-          // 🔥 Buscar a exchange MEXC (evita busca repetitiva)
-          const exage = await this.exageRepository.findOne({ where: { id: 3 } });
-          if (!exage) {
-            this.logger.error('❌ Erro: Exchange MEXC não encontrada no banco de dados.');
-            return [];
-          }
-      
-          const now = new Date();
-          const currentMinute = now.getMinutes();
-      
-          // 🔥 Definir tipos explícitos para os arrays de batch
-          const bulkUpdates: { id: number; precing: number; volum: number; updated_at: Date }[] = [];
-          const bulkInserts: { ativo: { id: number }; exage: { id: number }; precing: number; type: number; volum: number; status: number; created_at: Date; updated_at: Date }[] = [];
-          const bulkHistory: { ativo: { id: number }; exage: { id: number }; precing: number; timestamp: Date }[] = [];
-      
-          for (const item of pricesData) {
-            const ativoId = ativosMap.get(item.symbol);
-            if (!ativoId) continue; // 🔥 Ignorar ativos não cadastrados
-      
-            const contractInfo = contractMap.get(item.symbol) || {
-              min_size: "N/A",
-              max_size: "N/A",
-              min_notional: "N/A",
-              max_notional: "N/A"
+            this.logger.log('🔍 Buscando preços futuros da MEXC...');
+
+            const axiosConfig = {
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000,
             };
-      
-            const validVolum = parseFloat(contractInfo.max_notional) || 0;
-            const lastPrice = parseFloat(item.lastPrice) || 0;
-      
-            // 🔥 Verifica se já existe um registro na tabela `precings`
-            const existingPrcing = await this.prcingRepository.findOne({
-              select: ['id', 'precing', 'volum'],
-              where: { ativo: { id: ativoId }, exage: { id: exage.id } }
+
+            // 🔥 Buscar os ativos cadastrados no banco de dados
+            const ativos = await this.ativosRepository.find({ 
+                select: ['id', 'name'], 
+                where: { status: 1 } 
             });
-      
-            if (existingPrcing) {
-              bulkUpdates.push({
-                id: existingPrcing.id,
-                precing: lastPrice,
-                volum: validVolum,
-                updated_at: now
-              });
-            } else {
-              bulkInserts.push({
-                ativo: { id: ativoId },
-                exage: { id: exage.id },
-                precing: lastPrice,
-                type: 1,
-                volum: validVolum,
-                status: 1,
-                created_at: now,
-                updated_at: now
-              });
+
+            if (ativos.length === 0) {
+                this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na MEXC.');
+                return [];
             }
-      
-            // 🔥 Verifica se já existe um registro no histórico para esse ativo na MEXC no mesmo minuto
-            const existingHistory = await this.prcingHistoryRepository.findOne({
-              where: { ativo: { id: ativoId }, exage: { id: exage.id } },
-              order: { timestamp: "DESC" }
-            });
-      
-            if (!existingHistory || new Date(existingHistory.timestamp).getMinutes() !== currentMinute) {
-              bulkHistory.push({
-                ativo: { id: ativoId },
-                exage: { id: exage.id },
-                precing: lastPrice,
-                timestamp: now
-              });
+
+            // 🔥 Criar um mapa de ativos para acesso rápido
+            const ativosMap = new Map(ativos.map(ativo => [ativo.name.replace(/(\w+)(USDT)/, '$1_USDT'), ativo.id]));
+
+            // 🔥 Buscar as APIs da MEXC em paralelo
+            const [pricesResponse, contractsResponse] = await Promise.all([
+                axios.get<{ data: { symbol: string; lastPrice: string; highPrice24h: string; lowPrice24h: string; fundingRate: string; priceChangePercent: string; volume: string; }[] }>(this.mexcAPI, axiosConfig),
+                axios.get<{ data: { symbol: string; minVol: string; maxVol: string; minAmount: string; maxAmount: string; }[] }>(this.mexcContractsAPI, axiosConfig)
+            ]);
+
+            const pricesData = pricesResponse.data.data || [];
+            const contractsData = contractsResponse.data.data || [];
+
+            // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
+            const contractMap = new Map(contractsData.map(contract => [
+                contract.symbol, 
+                {
+                    min_size: contract.minVol || "N/A",  
+                    max_size: contract.maxVol || "N/A",  
+                    min_notional: contract.minAmount || "N/A", 
+                    max_notional: contract.maxAmount || "N/A"
+                }
+            ]));
+
+            // 🔥 Buscar a exchange MEXC
+            const exage = await this.exageRepository.findOne({ where: { id: 3 } });
+            if (!exage) {
+                this.logger.error('❌ Erro: Exchange MEXC não encontrada no banco de dados.');
+                return [];
             }
-          }
-      
-          // 🔥 Realizar inserções e atualizações em batch para evitar carga excessiva no banco
-          if (bulkUpdates.length > 0) {
-            await this.prcingRepository.save(bulkUpdates);
-          }
-          if (bulkInserts.length > 0) {
-            await this.prcingRepository.save(bulkInserts);
-          }
-          if (bulkHistory.length > 0) {
-            await this.prcingHistoryRepository.save(bulkHistory);
-          }
-      
-          this.logger.log(`✅ Atualizados ${bulkUpdates.length}, Inseridos ${bulkInserts.length}, Histórico ${bulkHistory.length}`);
-      
-          return pricesData.map(item => ({
-            pair: item.symbol.replace('_', '/'),
-            last_price: item.lastPrice,
-            highest_price_24h: item.highPrice24h,
-            lowest_price_24h: item.lowPrice24h,
-            funding_rate: item.fundingRate,
-            change_24h: item.priceChangePercent,
-            min_size: contractMap.get(item.symbol)?.min_size || "N/A",
-            max_size: contractMap.get(item.symbol)?.max_size || "N/A",
-            min_notional: contractMap.get(item.symbol)?.min_notional || "N/A",
-            max_notional: contractMap.get(item.symbol)?.max_notional || "N/A"
-          }));
+
+            const now = new Date();
+            now.setSeconds(0, 0); // Remove segundos e milissegundos para agrupar por minuto
+
+            const batchSize = 10;
+            const priceChunks: any[][] = [];
+
+            for (let i = 0; i < pricesData.length; i += batchSize) {
+                priceChunks.push(pricesData.slice(i, i + batchSize));
+            }
+
+            for (const chunk of priceChunks) {
+                const bulkUpdates: Array<{ id: number; precing: number; volum: number; updated_at: Date }> = [];
+                const bulkInserts: Array<{ ativo: { id: number }; exage: { id: number }; precing: number; type: number; volum: number; status: number; created_at: Date; updated_at: Date }> = [];
+                const bulkHistoryUpdates: Array<{ id: number; precing: number; volum: number; timestamp: Date }> = [];
+                const bulkHistoryInserts: Array<{ ativo: { id: number }; exage: { id: number }; precing: number; volum: number; timestamp: Date }> = [];
+
+                await Promise.all(
+                    chunk.map(async (item: any) => {
+                        const ativoId = ativosMap.get(item.symbol);
+                        if (!ativoId) {
+                            console.log(`⚠️ Ativo ${item.symbol} não encontrado no banco.`);
+                            return;
+                        }
+
+                        console.log(`📌 Processando ${item.symbol}`);
+
+                        const lastPrice = parseFloat(item.lastPrice) || 0;
+                        const volum = parseFloat(item.volume) || 0;
+
+                        const contractInfo = contractMap.get(item.symbol) || {
+                            min_size: "N/A",
+                            max_size: "N/A",
+                            min_notional: "N/A",
+                            max_notional: "N/A"
+                        };
+
+                        const existingPrcing = await this.prcingRepository.findOne({
+                            select: ['id', 'precing'],
+                            where: { ativo: { id: ativoId }, exage: { id: exage.id } },
+                        });
+
+                        if (existingPrcing) {
+                            bulkUpdates.push({
+                                id: existingPrcing.id,
+                                precing: lastPrice,
+                                volum,
+                                updated_at: now,
+                            });
+                        } else {
+                            bulkInserts.push({
+                                ativo: { id: ativoId },
+                                exage: { id: exage.id },
+                                precing: lastPrice,
+                                type: 1,
+                                volum,
+                                status: 1,
+                                created_at: now,
+                                updated_at: now,
+                            });
+                        }
+
+                        const existingHistory = await this.prcingHistoryRepository.findOne({
+                            where: { ativo: { id: ativoId }, exage: { id: exage.id }, timestamp: now },
+                        });
+
+                        if (existingHistory) {
+                            bulkHistoryUpdates.push({
+                                id: existingHistory.id,
+                                precing: lastPrice,
+                                volum,
+                                timestamp: now,
+                            });
+                        } else {
+                            bulkHistoryInserts.push({
+                                ativo: { id: ativoId },
+                                exage: { id: exage.id },
+                                precing: lastPrice,
+                                volum,
+                                timestamp: now,
+                            });
+                        }
+                    })
+                );
+
+                if (bulkUpdates.length > 0) {
+                    await this.prcingRepository.save(bulkUpdates);
+                }
+                if (bulkInserts.length > 0) {
+                    await this.prcingRepository.save(bulkInserts);
+                }
+                if (bulkHistoryUpdates.length > 0) {
+                    await this.prcingHistoryRepository.save(bulkHistoryUpdates);
+                }
+                if (bulkHistoryInserts.length > 0) {
+                    await this.prcingHistoryRepository.save(bulkHistoryInserts);
+                }
+
+                this.logger.log(`✅ MEXC: Atualizados ${bulkUpdates.length}, Inseridos ${bulkInserts.length}, Histórico Atualizados ${bulkHistoryUpdates.length}, Histórico Inseridos ${bulkHistoryInserts.length}`);
+            }
+
+            return pricesData.map(item => ({
+                pair: item.symbol.replace('_', '/'),
+                last_price: item.lastPrice,
+                highest_price_24h: item.highPrice24h,
+                lowest_price_24h: item.lowPrice24h,
+                funding_rate: item.fundingRate,
+                change_24h: item.priceChangePercent,
+                min_size: contractMap.get(item.symbol)?.min_size || "N/A",
+                max_size: contractMap.get(item.symbol)?.max_size || "N/A",
+                min_notional: contractMap.get(item.symbol)?.min_notional || "N/A",
+                max_notional: contractMap.get(item.symbol)?.max_notional || "N/A"
+            }));
         } catch (error) {
-          this.logger.error(`❌ Erro ao buscar preços futuros da MEXC: ${error.message}`);
-          return [];
+            this.logger.error(`❌ Erro ao buscar preços futuros da MEXC: ${error.message}`);
+            return [];
         }
-      }
+    }
       
 
     async getBitgetFuturesPrices(): Promise<BitgetTicker[]> {
@@ -514,82 +571,164 @@ export class ArbitrageService {
     }
     }
 
-    @Cron('*/60 * * * * *')  // 🔥 Executa a cada 15 segundos
+    @Cron('*/30 * * * * *')  // 🔥 Executa a cada 30 segundos
     async getBinanceFuturesPrices(): Promise<BinancePrice[]> {
         try {
-          this.logger.log('🔍 Buscando preços da Binance...');
-    
-          const axiosConfig = {
-            httpsAgent: proxyAgent,
-            timeout: 15000,
-          };
-    
-          const [ativos, exages, response, contractsResponse] = await Promise.all([
-            this.ativosRepository.find({ where: { status: 1 } }),
-            this.exageRepository.find(),
-            axios.get(this.binanceFuturesAPI, axiosConfig),
-            axios.get(this.binanceContractsAPI, axiosConfig),
-          ]);
-    
-          if (!Array.isArray(response.data)) {
-            throw new Error('Dados da Binance não estão no formato esperado.');
-          }
-    
-          const ativosMap = new Map(ativos.map(a => [a.name, a]));
-          const exage = exages.find(e => e.id === 1);
-    
-          if (!exage) {
-            this.logger.error('❌ Corretora Binance não encontrada!');
-            return [];
-          }
-    
-          const contractsData = contractsResponse.data as { symbols: BinanceContract[] };
-          const contractMap = new Map(
-            contractsData.symbols.map(contract => [
-              contract.symbol,
-              {
-                min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
-                max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
-                min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
-              } as BinanceContractInfo,
-            ])
-          );
-    
-          const pricesData = response.data;
-          const processedData: BinancePrice[] = [];
-          const now = new Date();
-    
-          for (const item of pricesData) {
-            const ativo = ativosMap.get(item.symbol);
-            if (!ativo) continue;
-    
-            const contractInfo = contractMap.get(item.symbol) || {
-              min_size: "N/A",
-              max_size: "N/A",
-              min_notional: "N/A",
-            };
-    
-            processedData.push({
-              pair: item.symbol,
-              last_price: item.lastPrice,
-              highest_price_24h: item.highPrice,
-              lowest_price_24h: item.lowPrice,
-              funding_rate: item.fundingRate || "N/A",
-              change_24h: item.priceChangePercent,
-              min_size: contractInfo.min_size,
-              max_size: contractInfo.max_size,
-              min_notional: contractInfo.min_notional,
-            });
-          }
-    
-          this.logger.log(`✅ Preços da Binance atualizados (${processedData.length} ativos processados).`);
-          return processedData;
-        } catch (error) {
-          this.logger.error(`❌ Erro ao buscar preços da Binance: ${error.message}`);
-          return [];
-        }
-      }
+            this.logger.log('🔍 Buscando preços da Binance...');
 
+            const axiosConfig = {
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000,
+            };
+
+            const [ativos, exages, response, contractsResponse] = await Promise.all([
+                this.ativosRepository.find({ where: { status: 1 } }),
+                this.exageRepository.find(),
+                axios.get(this.binanceFuturesAPI, axiosConfig),
+                axios.get(this.binanceContractsAPI, axiosConfig),
+            ]);
+
+            console.log(`🔍 Ativos encontrados no banco: ${ativos.length}`);
+            console.log(`🔍 Resposta da API Binance:`, response.data);
+
+            if (!Array.isArray(response.data)) {
+                throw new Error('Dados da Binance não estão no formato esperado.');
+            }
+
+            const ativosMap = new Map(ativos.map(a => [a.name.toUpperCase(), a]));
+            const exage = exages.find(e => e.id === 1);
+
+            if (!exage) {
+                this.logger.error('❌ Corretora Binance não encontrada!');
+                return [];
+            }
+
+            const contractsData = contractsResponse.data as { symbols: BinanceContract[] };
+            const contractMap = new Map(
+                contractsData.symbols.map(contract => [
+                    contract.symbol,
+                    {
+                        min_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.minQty || "N/A",
+                        max_size: contract.filters.find(f => f.filterType === "LOT_SIZE")?.maxQty || "N/A",
+                        min_notional: contract.filters.find(f => f.filterType === "MIN_NOTIONAL")?.notional || "N/A",
+                    } as BinanceContractInfo,
+                ])
+            );
+
+            const pricesData: BinancePrice[] = response.data;
+            const processedData: BinancePrice[] = [];
+            const now = new Date();
+            now.setSeconds(0, 0);
+
+            const batchSize = 10;
+            const priceChunks: BinancePrice[][] = [];
+
+            for (let i = 0; i < pricesData.length; i += batchSize) {
+                priceChunks.push(pricesData.slice(i, i + batchSize));
+            }
+
+            for (const chunk of priceChunks) {
+                const bulkUpdates: Array<{ id: number; precing: number; volum: number; updated_at: Date }> = [];
+                const bulkInserts: Array<{ ativo: { id: number }; exage: { id: number }; precing: number; volum: number; type: number; status: number; created_at: Date; updated_at: Date }> = [];
+                const bulkHistoryUpdates: Array<{ id: number; precing: number; volum: number; timestamp: Date }> = [];
+                const bulkHistoryInserts: Array<{ ativo: { id: number }; exage: { id: number }; precing: number; volum: number; timestamp: Date }> = [];
+
+                await Promise.all(
+                    chunk.map(async (item: any) => {
+                        const ativo = ativosMap.get(item.symbol.toUpperCase());
+                        if (!ativo) {
+                            console.log(`⚠️ Ativo ${item.symbol} não encontrado no banco.`);
+                            return;
+                        }
+
+                        console.log(`📌 Processando ${item.symbol}`);
+
+                        const lastPrice = parseFloat(item.lastPrice) || 0;
+                        const volum = parseFloat(item.volume) || 0; // Adicionando volume corretamente
+
+                        const existingPrcing = await this.prcingRepository.findOne({
+                            select: ['id', 'precing'],
+                            where: { ativo: { id: ativo.id }, exage: { id: exage.id } },
+                        });
+
+                        if (existingPrcing) {
+                            bulkUpdates.push({
+                                id: existingPrcing.id,
+                                precing: lastPrice,
+                                volum,
+                                updated_at: now,
+                            });
+                        } else {
+                            bulkInserts.push({
+                                ativo: { id: ativo.id },
+                                exage: { id: exage.id },
+                                precing: lastPrice,
+                                volum,
+                                type: 1,
+                                status: 1,
+                                created_at: now,
+                                updated_at: now,
+                            });
+                        }
+
+                        const existingHistory = await this.prcingHistoryRepository.findOne({
+                            where: { ativo: { id: ativo.id }, exage: { id: exage.id }, timestamp: now },
+                        });
+
+                        if (existingHistory) {
+                            bulkHistoryUpdates.push({
+                                id: existingHistory.id,
+                                precing: lastPrice,
+                                volum,
+                                timestamp: now,
+                            });
+                        } else {
+                            bulkHistoryInserts.push({
+                                ativo: { id: ativo.id },
+                                exage: { id: exage.id },
+                                precing: lastPrice,
+                                volum,
+                                timestamp: now,
+                            });
+                        }
+
+                        processedData.push({
+                            pair: item.symbol,
+                            last_price: lastPrice.toFixed(4),
+                            highest_price_24h: item.highPrice,
+                            lowest_price_24h: item.lowPrice,
+                            funding_rate: item.fundingRate || "N/A",
+                            change_24h: item.priceChangePercent,
+                            min_size: contractMap.get(item.symbol)?.min_size || "N/A",
+                            max_size: contractMap.get(item.symbol)?.max_size || "N/A",
+                            min_notional: contractMap.get(item.symbol)?.min_notional || "N/A",
+                        });
+                    })
+                );
+
+                if (bulkUpdates.length > 0) {
+                    await this.prcingRepository.save(bulkUpdates);
+                }
+                if (bulkInserts.length > 0) {
+                    await this.prcingRepository.save(bulkInserts);
+                }
+                if (bulkHistoryUpdates.length > 0) {
+                    await this.prcingHistoryRepository.save(bulkHistoryUpdates);
+                }
+                if (bulkHistoryInserts.length > 0) {
+                    await this.prcingHistoryRepository.save(bulkHistoryInserts);
+                }
+
+                this.logger.log(`✅ Binance: Atualizados ${bulkUpdates.length}, Inseridos ${bulkInserts.length}, Histórico Atualizados ${bulkHistoryUpdates.length}, Histórico Inseridos ${bulkHistoryInserts.length}`);
+            }
+
+            return processedData;
+        } catch (error) {
+            this.logger.error(`❌ Erro ao buscar preços da Binance: ${error.message}`);
+            return [];
+        }
+    }
+    
 
     async getHtxFuturesPrices(): Promise<any[]> {
     try {
@@ -698,9 +837,28 @@ export class ArbitrageService {
               const precoCompra = Number(compra.precing);
               const precoVenda = Number(venda.precing);
               const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
-  
+
               // 🔥 Calcula a atualização apenas uma vez
-              const atualizado = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
+              const agora = new Date().getTime();
+              const atualizadoSegundos = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
+
+              let atualizadoFormatado: string;
+
+              if (atualizadoSegundos < 60) {
+                  atualizadoFormatado = `${atualizadoSegundos} segundos atrás`;
+              } else if (atualizadoSegundos < 3600) {
+                  const minutos = Math.floor(atualizadoSegundos / 60);
+                  const segundos = atualizadoSegundos % 60;
+                  atualizadoFormatado = `${minutos} minutos e ${segundos} segundos atrás`;
+              } else if (atualizadoSegundos < 86400) {
+                  const horas = Math.floor(atualizadoSegundos / 3600);
+                  const minutos = Math.floor((atualizadoSegundos % 3600) / 60);
+                  atualizadoFormatado = `${horas} horas e ${minutos} minutos atrás`;
+              } else {
+                  const dias = Math.floor(atualizadoSegundos / 86400);
+                  const horas = Math.floor((atualizadoSegundos % 86400) / 3600);
+                  atualizadoFormatado = `${dias} dias e ${horas} horas atrás`;
+              }
   
               // 🔥 Gerar os links para o ativo nas exchanges envolvidas
               const link_01 = this.generateExchangeLink(compra.exage.name, ativo);
@@ -713,7 +871,7 @@ export class ArbitrageService {
                   Precing_Compra: precoCompra.toFixed(4),
                   Precing_Venda: precoVenda.toFixed(4),
                   Spread: spread.toFixed(2) + '%',
-                  Atualizado: `${atualizado} segundos atrás`,
+                  Atualizado: `${atualizadoFormatado} segundos atrás`,
                   link_01,
                   link_02,
               });
@@ -800,24 +958,24 @@ export class ArbitrageService {
 
         // 🔥 Ajustar formato do ativo para corretoras específicas
         const formattedAtivo =
-            exchange.toLowerCase() === 'gate.io' || exchange.toLowerCase() === 'mexc'
+            exchange.toLowerCase() === 'Gate.io' || exchange.toLowerCase() === 'MEXC'
                 ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT')
                 : ativo;
 
         switch (exchange.toLowerCase()) {
-            case 'binance':
+            case 'Binance':
                 url = `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${formattedAtivo}`;
                 priceKey = 'lastPrice';
                 fundingRateKey = 'fundingRate';
                 volumeKey = 'volume';
                 break;
-            case 'gate.io':
+            case 'Gate.io':
                 url = `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${formattedAtivo}`;
                 priceKey = 'last';
                 fundingRateKey = 'funding_rate';
                 volumeKey = 'volume';
                 break;
-            case 'mexc':
+            case 'MEXC':
                 url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
                 priceKey = 'data.lastPrice';
                 fundingRateKey = 'data.fundingRate';
@@ -892,18 +1050,18 @@ export class ArbitrageService {
         let url = '';
 
         // 🔥 Ajustar formato do ativo para corretoras específicas (Gate.io e MEXC exigem BTC_USDT)
-        const formattedAtivo = exchange.toLowerCase() === 'gate.io' || exchange.toLowerCase() === 'mexc'
+        const formattedAtivo = exchange.toLowerCase() === 'Gate.io' || exchange.toLowerCase() === 'MEXC'
             ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT') 
             : ativo;
 
         switch (exchange.toLowerCase()) {
-            case 'binance':
+            case 'Binance':
                 url = `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${formattedAtivo}`;
                 break;
-            case 'gate.io':
+            case 'Gate.io':
                 url = `https://api.gateio.ws/api/v4/futures/usdt/tickers`;
                 break;
-            case 'mexc':
+            case 'MEXC':
                 url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
                 break;
             case 'bitget':
@@ -927,14 +1085,14 @@ export class ArbitrageService {
         let priceData: { price: string; timestamp: number } | null = null;
 
         // 🔥 **Corrigindo a validação usando `typeof` e `Array.isArray()`**
-        if (exchange.toLowerCase() === 'binance' && typeof response.data === 'object' && 'price' in response.data) {
+        if (exchange.toLowerCase() === 'Binance' && typeof response.data === 'object' && 'price' in response.data) {
             priceData = {
                 price: parseFloat((response.data as { price: string }).price).toString(),
                 timestamp: Date.now()
             };
         }
 
-        if (exchange.toLowerCase() === 'gate.io' && Array.isArray(response.data)) {
+        if (exchange.toLowerCase() === 'Gate.io' && Array.isArray(response.data)) {
             const gateData = response.data.find((item: any) => item.contract === formattedAtivo);
             if (gateData && typeof gateData === 'object' && 'last' in gateData) {
                 priceData = {
@@ -944,7 +1102,7 @@ export class ArbitrageService {
             }
         }
 
-        if (exchange.toLowerCase() === 'mexc' && typeof response.data === 'object' && response.data.hasOwnProperty('data')) {
+        if (exchange.toLowerCase() === 'MEXC' && typeof response.data === 'object' && response.data.hasOwnProperty('data')) {
             const mexcData = response.data as { data: { lastPrice: string } };
             if ('lastPrice' in mexcData.data) {
                 priceData = {
