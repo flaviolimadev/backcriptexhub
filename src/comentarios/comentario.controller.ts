@@ -7,8 +7,8 @@ export class ComentarioController {
 
   // ✅ Criar um novo comentário
   @Post()
-  async create(@Body() body: { aulaId: number; userId: number; comentario: string; type?: number; comentarioId?: number }) {
-    return await this.comentarioService.createComentario(body.aulaId, body.userId, body.comentario, body.type || 1, body.comentarioId);
+  async create(@Body() body: { aulaId: number; userId: number; comentario: string; type: number; comentarioId?: number }) {
+    return await this.comentarioService.createComentario(body.aulaId, body.userId, body.comentario, body.type, body.comentarioId);
   }
 
   // ✅ Buscar comentários de uma aula

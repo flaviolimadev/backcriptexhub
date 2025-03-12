@@ -8,7 +8,7 @@ export class AcoesComentario {
   id: number;
 
   @ManyToOne(() => Comentario, (comentario) => comentario.acoes, { onDelete: 'CASCADE' })
-  comentario: Comentario;
+    comentario: Comentario;
 
   @ManyToOne(() => User, (user) => user.acoesComentario, { onDelete: 'CASCADE' })
   user: User;

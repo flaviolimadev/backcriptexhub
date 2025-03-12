@@ -6,6 +6,7 @@ import { Modulo } from '../modulos/entities/modulo.entity';
 import { Comentario } from '../comentarios/entities/comentario.entity';
 import { AcoesAula } from '../acoes_aula/entities/acoes_aula.entity';
 import { Curso } from '../cursos/entities/curso.entity';
+import { AcoesComentario } from '../acoes_comentario/entities/acoes_comentario.entity'; // ✅ Adicionando a entidade correta
 
 @Injectable()
 export class AulaService {
@@ -21,6 +22,9 @@ export class AulaService {
 
     @InjectRepository(Modulo)
     private readonly moduloRepository: Repository<Modulo>,
+
+    @InjectRepository(AcoesComentario) // ✅ Agora injetamos corretamente
+    private readonly acoesComentarioRepository: Repository<AcoesComentario>,
 
     @InjectRepository(Curso)
     private readonly cursoRepository: Repository<Curso> // ✅ Correção
@@ -133,6 +137,12 @@ export class AulaService {
         relations: ['user'],
     });
 
+    // 🔍 Buscar ações (likes/saves) de todos os comentários da aula
+    const acoesComentarios = await this.acoesComentarioRepository.find({
+        where: { comentario: { aula: { id: aulaId } } },
+        relations: ['comentario', 'user'],
+    });
+
     // 🔍 Buscar total de curtidas na aula
     const totalCurtidas = await this.acoesAulaRepository.count({
         where: { aula: { id: aulaId }, like: true },
@@ -146,18 +156,40 @@ export class AulaService {
     // 🔍 Buscar módulos do curso com todas as aulas de cada módulo
     const modulos = await this.moduloRepository.find({
         where: { curso: { id: aula.modulo.curso.id } },
-        relations: ['aulas'], // Adiciona as aulas dentro de cada módulo
+        relations: ['aulas'],
     });
+
+    // 🔍 Contar total de aulas do curso
+    const totalAulas = await this.aulaRepository.count({
+        where: { modulo: { curso: { id: aula.modulo.curso.id } } },
+    });
+
+    // 🔍 Contar aulas concluídas pelo usuário
+    const aulasConcluidas = await this.acoesAulaRepository.count({
+        where: { aula: { modulo: { curso: { id: aula.modulo.curso.id } } }, user: { id: userId }, finalizada: true },
+    });
+
+    // 🔥 Calcular o percentual de conclusão do curso
+    const progressoCurso = totalAulas > 0 ? ((aulasConcluidas / totalAulas) * 100).toFixed(2) : "0";
 
     console.log(`✅ Aula encontrada:`, aula);
 
     return {
         aula,
-        comentarios: comentarios.map((comentario) => ({
-            id: comentario.id,
-            texto: comentario.comentario,
-            usuario: comentario.user ? comentario.user.first_name : 'Usuário desconhecido',
-        })),
+        comentarios: comentarios.map((comentario) => {
+            const acoes = acoesComentarios.filter(acao => acao.comentario.id === comentario.id);
+
+            return {
+                id: comentario.id,
+                texto: comentario.comentario,
+                usuario: comentario.user ? comentario.user.first_name : 'Usuário desconhecido',
+                acoes: acoes.map((acao) => ({
+                    userId: acao.user.id,
+                    like: acao.like,
+                    save: acao.save,
+                })),
+            };
+        }),
         totalCurtidas,
         acoesUsuario: acoesUsuario || {
             like: false,
@@ -165,26 +197,51 @@ export class AulaService {
             save: false,
         },
         curso: aula.modulo.curso,
-        modulos: modulos.map((modulo) => ({
-            id: modulo.id,
-            name: modulo.name,
-            descricao: modulo.descricao,
-            avatar: modulo.avatar,
-            status: modulo.status,
-            libera_em: modulo.libera_em,
-            garantia: modulo.garantia,
-            aulas: modulo.aulas.map((aula) => ({
-                id: aula.id,
-                name: aula.name,
-                descricao: aula.descricao,
-                link: aula.link,
-                avatar: aula.avatar,
-                status: aula.status,
-                libera_em: aula.libera_em,
-                garantia: aula.garantia,
-            })),
-        })),
+        modulos: await Promise.all(
+            modulos.map(async (modulo) => {
+                // 🔍 Buscar ações do usuário para cada aula do módulo
+                const aulas = await Promise.all(
+                    modulo.aulas.map(async (aula) => {
+                        const acaoAula = await this.acoesAulaRepository.findOne({
+                            where: { aula: { id: aula.id }, user: { id: userId } },
+                        });
+
+                        return {
+                            id: aula.id,
+                            name: aula.name,
+                            descricao: aula.descricao,
+                            link: aula.link,
+                            avatar: aula.avatar,
+                            status: aula.status,
+                            libera_em: aula.libera_em,
+                            garantia: aula.garantia,
+                            finalizada: acaoAula ? acaoAula.finalizada : false, // 🔥 Indica se o usuário concluiu a aula
+                            like: acaoAula ? acaoAula.like : false, // 🔥 Indica se o usuário curtiu a aula
+                            save: acaoAula ? acaoAula.save : false, // 🔥 Indica se o usuário salvou a aula
+                        };
+                    })
+                );
+
+                return {
+                    id: modulo.id,
+                    name: modulo.name,
+                    descricao: modulo.descricao,
+                    avatar: modulo.avatar,
+                    status: modulo.status,
+                    libera_em: modulo.libera_em,
+                    garantia: modulo.garantia,
+                    aulas,
+                };
+            })
+        ),
+        resumoProgresso: {
+            totalAulas,
+            aulasConcluidas,
+            progressoCurso: `${progressoCurso}%`,
+        },
     };
-}
+  }
+
+
 
 }
