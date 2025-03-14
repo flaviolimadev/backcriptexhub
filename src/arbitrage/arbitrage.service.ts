@@ -792,102 +792,198 @@ export class ArbitrageService {
     }
 
 
-    async getArbitrageOpportunities(): Promise<any[]> {
-      try {
-          this.logger.log('🔍 Analisando oportunidades de arbitragem...');
-  
-          // 🔥 Buscar apenas os preços recentes do banco de dados (últimos 60 segundos)
-          const precings = await this.prcingRepository.find({
-              select: ['precing', 'updated_at'],
-              where: { updated_at: MoreThan(new Date(Date.now() - 60 * 1000)) }, // Apenas preços recentes
-              relations: ['ativo', 'exage'],
-          });
-  
-          if (precings.length === 0) {
-              this.logger.warn('⚠️ Nenhum dado de preço recente disponível para análise.');
-              return [];
-          }
-  
-          const precingsByAtivo = new Map<string, any[]>();
-  
-          for (const p of precings) {
-              const ativoName = p.ativo.name;
-              if (!precingsByAtivo.has(ativoName)) {
-                  precingsByAtivo.set(ativoName, []);
-              }
-              precingsByAtivo.get(ativoName)!.push(p);
-          }
-  
-          const oportunidades: any[] = [];
-          const agora = Date.now(); // Timestamp atual
-  
-          for (const [ativo, precings] of precingsByAtivo.entries()) {
-              if (precings.length < 2) continue; // Ignora ativos sem ao menos 2 preços
-  
-              // 🔥 Buscar preços atualizados nas corretoras para esse ativo
-              const pricesPromises = precings.map(async (p) => {
-                  const updatedPrice = await this.getPriceFromExchange(ativo, p.exage.name);
-                  return { ...p, precing: updatedPrice.price || p.precing }; // Atualiza se a API responder corretamente
-              });
-  
-              const precingsAtualizados = await Promise.all(pricesPromises);
-  
-              // 🔥 Encontrar menor (compra) e maior (venda) preço
-              let compra = precingsAtualizados[0];
-              let venda = precingsAtualizados[0];
-  
-              for (const p of precingsAtualizados) {
-                  if (Number(p.precing) < Number(compra.precing)) compra = p;
-                  if (Number(p.precing) > Number(venda.precing)) venda = p;
-              }
-  
-              // 🔥 Se não há spread positivo, ignora a oportunidade
-              if (Number(compra.precing) >= Number(venda.precing)) continue;
-  
-              const precoCompra = Number(compra.precing);
-              const precoVenda = Number(venda.precing);
-              const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
-  
-              // 🔥 Tempo desde a última atualização
-              const atualizadoSegundos = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
-  
-              let atualizadoFormatado: string;
-              if (atualizadoSegundos < 60) {
-                  atualizadoFormatado = `${atualizadoSegundos} segundos atrás`;
-              } else if (atualizadoSegundos < 3600) {
-                  const minutos = Math.floor(atualizadoSegundos / 60);
-                  atualizadoFormatado = `${minutos} minutos atrás`;
-              } else {
-                  const horas = Math.floor(atualizadoSegundos / 3600);
-                  atualizadoFormatado = `${horas} horas atrás`;
-              }
-  
-              // 🔥 Gerar os links para as exchanges envolvidas
-              const link_01 = this.generateExchangeLink(compra.exage.name, ativo);
-              const link_02 = this.generateExchangeLink(venda.exage.name, ativo);
-  
-              // 🔥 Adiciona à lista de oportunidades
-              oportunidades.push({
-                  Moeda: ativo,
-                  Compra: compra.exage.name,
-                  Venda: venda.exage.name,
-                  Precing_Compra: precoCompra.toFixed(4),
-                  Precing_Venda: precoVenda.toFixed(4),
-                  Spread: spread.toFixed(2) + '%',
-                  Atualizado: atualizadoFormatado,
-                  link_01,
-                  link_02,
-              });
-          }
-  
-          this.logger.log(`✅ Oportunidades encontradas: ${oportunidades.length}`);
-          return oportunidades;
-      } catch (error) {
-          this.logger.error(`❌ Erro ao calcular oportunidades de arbitragem: ${error.message}`);
-          return [];
+async getArbitrageOpportunities(): Promise<any[]> {
+    try {
+        this.logger.log('🔍 Analisando oportunidades de arbitragem...');
+
+        // 🔥 Buscar apenas os preços recentes do banco de dados (últimos 60 segundos)
+        const precings = await this.prcingRepository.find({
+            select: ['precing', 'updated_at'],
+            where: { updated_at: MoreThan(new Date(Date.now() - 60 * 1000)) }, // Apenas preços recentes
+            relations: ['ativo', 'exage'],
+        });
+
+        if (precings.length === 0) {
+            this.logger.warn('⚠️ Nenhum dado de preço recente disponível para análise.');
+            return [];
+        }
+
+        // 🔥 Organizar os preços por ativo
+        const precingsByAtivo = new Map<string, any[]>();
+
+        for (const p of precings) {
+            const ativoName = p.ativo.name;
+            if (!precingsByAtivo.has(ativoName)) {
+                precingsByAtivo.set(ativoName, []);
+            }
+            precingsByAtivo.get(ativoName)!.push(p);
+        }
+
+        const oportunidades: any[] = [];
+        const agora = Date.now(); // Timestamp atual
+
+        for (const [ativo, precings] of precingsByAtivo.entries()) {
+            if (precings.length < 2) continue; // Ignora ativos sem ao menos 2 preços
+
+            // 🔥 Buscar preços atualizados nas corretoras para esse ativo
+            const pricesPromises = precings.map(async (p) => {
+                const updatedPrice = await this.getPriceFromExchange(ativo, p.exage.name);
+                return {
+                    ...p,
+                    precing: updatedPrice.price && updatedPrice.price > 0 ? updatedPrice.price : p.precing, // Se não obtiver preço atualizado, usa o do banco
+                };
+            });
+
+            const precingsAtualizados = await Promise.all(pricesPromises);
+
+            // 🔥 Encontrar menor (compra) e maior (venda) preço
+            let compra = precingsAtualizados[0];
+            let venda = precingsAtualizados[0];
+
+            for (const p of precingsAtualizados) {
+                if (Number(p.precing) < Number(compra.precing)) compra = p;
+                if (Number(p.precing) > Number(venda.precing)) venda = p;
+            }
+
+            // 🔥 Se não há spread positivo, ignora a oportunidade
+            if (Number(compra.precing) >= Number(venda.precing)) continue;
+
+            const precoCompra = Number(compra.precing);
+            const precoVenda = Number(venda.precing);
+            const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
+
+            // 🔥 Tempo desde a última atualização
+            const atualizadoSegundos = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
+
+            let atualizadoFormatado: string;
+            if (atualizadoSegundos < 60) {
+                atualizadoFormatado = `${atualizadoSegundos} segundos atrás`;
+            } else if (atualizadoSegundos < 3600) {
+                const minutos = Math.floor(atualizadoSegundos / 60);
+                atualizadoFormatado = `${minutos} minutos atrás`;
+            } else {
+                const horas = Math.floor(atualizadoSegundos / 3600);
+                atualizadoFormatado = `${horas} horas atrás`;
+            }
+
+            // 🔥 Gerar os links para as exchanges envolvidas
+            const link_01 = this.generateExchangeLink(compra.exage.name, ativo);
+            const link_02 = this.generateExchangeLink(venda.exage.name, ativo);
+
+            // 🔥 Adiciona à lista de oportunidades
+            oportunidades.push({
+                Moeda: ativo,
+                Compra: compra.exage.name,
+                Venda: venda.exage.name,
+                Precing_Compra: precoCompra.toFixed(4),
+                Precing_Venda: precoVenda.toFixed(4),
+                Spread: spread.toFixed(2) + '%',
+                Atualizado: atualizadoFormatado,
+                link_01,
+                link_02,
+            });
+        }
+
+        this.logger.log(`✅ Oportunidades encontradas: ${oportunidades.length}`);
+        return oportunidades;
+    } catch (error) {
+        this.logger.error(`❌ Erro ao calcular oportunidades de arbitragem: ${error.message}`);
+        return [];
+    }
+}
+
+async getPriceFromExchange(ativo: string, exchange: string): Promise<{ price: number; fundingRate: number; volume: number }> {
+  try {
+      let url = '';
+      let priceKey = '';
+      let fundingRateKey = '';
+      let volumeKey = '';
+
+      // 🔥 Ajustar formato do ativo para corretoras específicas
+      const formattedAtivo =
+          exchange.toLowerCase() === 'Gate.io' || exchange.toLowerCase() === 'MEXC'
+              ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT')
+              : ativo;
+
+      switch (exchange.toLowerCase()) {
+          case 'Binance':
+              url = `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${formattedAtivo}`;
+              priceKey = 'lastPrice';
+              fundingRateKey = 'fundingRate';
+              volumeKey = 'volume';
+              break;
+          case 'Gate.io':
+              url = `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${formattedAtivo}`;
+              priceKey = 'last';
+              fundingRateKey = 'funding_rate';
+              volumeKey = 'volume';
+              break;
+          case 'MEXC':
+              url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
+              priceKey = 'data.lastPrice';
+              fundingRateKey = 'data.fundingRate';
+              volumeKey = 'data.volume';
+              break;
+          case 'bitget':
+              url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${formattedAtivo}`;
+              priceKey = 'last';
+              fundingRateKey = 'fundingRate';
+              volumeKey = 'volume';
+              break;
+          case 'htx':
+              url = `https://api.huobi.pro/market/detail/merged?symbol=${formattedAtivo.toLowerCase()}`;
+              priceKey = 'close';
+              fundingRateKey = 'fundingRate';
+              volumeKey = 'vol';
+              break;
+          default:
+              this.logger.error(`❌ Exchange ${exchange} não reconhecida.`);
+              return { price: 0, fundingRate: 0, volume: 0 };
       }
+
+      let attempts = 3; // 🔥 Tentativas de reexecução
+      while (attempts > 0) {
+          try {
+              const response = await axios.get(url, { timeout: 15000 }); // 🔥 Timeout de 15s
+              const data = response.data as any;
+
+              if (exchange.toLowerCase() === 'gate.io') {
+                  const filteredData = data.find((item: any) => item.contract === formattedAtivo);
+                  if (!filteredData) {
+                      throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na Gate.io`);
+                  }
+                  return {
+                      price: parseFloat(filteredData[priceKey] || '0'),
+                      fundingRate: parseFloat(filteredData[fundingRateKey] || '0'),
+                      volume: parseFloat(filteredData[volumeKey] || '0'),
+                  };
+              }
+
+              // 🔥 A MEXC coloca os dados dentro de um objeto `data`
+              return {
+                  price: parseFloat(priceKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
+                  fundingRate: parseFloat(fundingRateKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
+                  volume: parseFloat(volumeKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
+              };
+          } catch (error) {
+              if (error.code === 'ECONNRESET' || error.message.includes('socket hang up')) {
+                  this.logger.warn(`⚠️ Timeout na ${exchange}. Tentando novamente... (${3 - attempts + 1}/3)`);
+                  attempts--;
+                  await new Promise((res) => setTimeout(res, 2000)); // 🔥 Espera antes de tentar de novo
+                  continue;
+              }
+              this.logger.error(`❌ Erro ao buscar preço para ${ativo} na ${exchange}:`, error.message);
+              return { price: 0, fundingRate: 0, volume: 0 };
+          }
+      }
+
+      this.logger.error(`❌ Falha ao buscar preço na ${exchange} após múltiplas tentativas.`);
+      return { price: 0, fundingRate: 0, volume: 0 };
+  } catch (error) {
+      this.logger.error(`❌ Erro inesperado ao buscar preço para ${ativo} na ${exchange}:`, error.message);
+      return { price: 0, fundingRate: 0, volume: 0 };
   }
-  
+  }
 
 
     // 🔥 Função auxiliar para gerar os links dinâmicos das corretoras
@@ -949,100 +1045,6 @@ export class ArbitrageService {
     } catch (error) {
         this.logger.error('❌ Erro ao buscar análise de arbitragem em tempo real:', error.message);
         return { error: 'Erro ao processar a solicitação' };
-    }
-    }
-
-
-    async getPriceFromExchange(ativo: string, exchange: string): Promise<{ price: number; fundingRate: number; volume: number }> {
-    try {
-        let url = '';
-        let priceKey = '';
-        let fundingRateKey = '';
-        let volumeKey = '';
-
-        // 🔥 Ajustar formato do ativo para corretoras específicas
-        const formattedAtivo =
-            exchange.toLowerCase() === 'Gate.io' || exchange.toLowerCase() === 'MEXC'
-                ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT')
-                : ativo;
-
-        switch (exchange.toLowerCase()) {
-            case 'Binance':
-                url = `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${formattedAtivo}`;
-                priceKey = 'lastPrice';
-                fundingRateKey = 'fundingRate';
-                volumeKey = 'volume';
-                break;
-            case 'Gate.io':
-                url = `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${formattedAtivo}`;
-                priceKey = 'last';
-                fundingRateKey = 'funding_rate';
-                volumeKey = 'volume';
-                break;
-            case 'MEXC':
-                url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
-                priceKey = 'data.lastPrice';
-                fundingRateKey = 'data.fundingRate';
-                volumeKey = 'data.volume';
-                break;
-            case 'bitget':
-                url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${formattedAtivo}`;
-                priceKey = 'last';
-                fundingRateKey = 'fundingRate';
-                volumeKey = 'volume';
-                break;
-            case 'htx':
-                url = `https://api.huobi.pro/market/detail/merged?symbol=${formattedAtivo.toLowerCase()}`;
-                priceKey = 'close';
-                fundingRateKey = 'fundingRate';
-                volumeKey = 'vol';
-                break;
-            default:
-                this.logger.error(`❌ Exchange ${exchange} não reconhecida.`);
-                return { price: 0, fundingRate: 0, volume: 0 };
-        }
-
-        let attempts = 3; // 🔥 Tentativas de reexecução
-        while (attempts > 0) {
-            try {
-                const response = await axios.get(url, { timeout: 15000 }); // 🔥 Timeout de 15s
-                const data = response.data as any;
-
-                if (exchange.toLowerCase() === 'gate.io') {
-                    const filteredData = data.find((item: any) => item.contract === formattedAtivo);
-                    if (!filteredData) {
-                        throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na Gate.io`);
-                    }
-                    return {
-                        price: parseFloat(filteredData[priceKey] || '0'),
-                        fundingRate: parseFloat(filteredData[fundingRateKey] || '0'),
-                        volume: parseFloat(filteredData[volumeKey] || '0'),
-                    };
-                }
-
-                // 🔥 A MEXC coloca os dados dentro de um objeto `data`
-                return {
-                    price: parseFloat(priceKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
-                    fundingRate: parseFloat(fundingRateKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
-                    volume: parseFloat(volumeKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
-                };
-            } catch (error) {
-                if (error.code === 'ECONNRESET' || error.message.includes('socket hang up')) {
-                    this.logger.warn(`⚠️ Timeout na ${exchange}. Tentando novamente... (${3 - attempts + 1}/3)`);
-                    attempts--;
-                    await new Promise((res) => setTimeout(res, 2000)); // 🔥 Espera antes de tentar de novo
-                    continue;
-                }
-                this.logger.error(`❌ Erro ao buscar preço para ${ativo} na ${exchange}:`, error.message);
-                return { price: 0, fundingRate: 0, volume: 0 };
-            }
-        }
-
-        this.logger.error(`❌ Falha ao buscar preço na ${exchange} após múltiplas tentativas.`);
-        return { price: 0, fundingRate: 0, volume: 0 };
-    } catch (error) {
-        this.logger.error(`❌ Erro inesperado ao buscar preço para ${ativo} na ${exchange}:`, error.message);
-        return { price: 0, fundingRate: 0, volume: 0 };
     }
     }
 
@@ -1146,5 +1148,152 @@ export class ArbitrageService {
         return [];
     }
     }
+
+
+    async getLiveArbitrage(ativo: string, exchange1: string, exchange2: string): Promise<any> {
+      try {
+          this.logger.log(`🔍 Comparando ${ativo} entre ${exchange1} e ${exchange2}...`);
+
+          // 🔥 Buscar preços em tempo real nas duas corretoras
+          const [price1, price2] = await Promise.all([
+              this.getPriceFromExchange(ativo, exchange1),
+              this.getPriceFromExchange(ativo, exchange2),
+          ]);
+
+          // 🔥 Verificar se os dados foram retornados corretamente
+          if (!price1.price || !price2.price) {
+              return { error: `❌ Dados não disponíveis para uma das corretoras.` };
+          }
+
+          // 🔥 Identificar melhor compra e venda
+          const comprarEm = price1.price < price2.price ? exchange1 : exchange2;
+          const venderEm = price1.price > price2.price ? exchange1 : exchange2;
+          const precoCompra = Math.min(price1.price, price2.price);
+          const precoVenda = Math.max(price1.price, price2.price);
+          const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
+
+          return {
+              ativo,
+              preços: {
+                  [exchange1]: price1.price.toFixed(4),
+                  [exchange2]: price2.price.toFixed(4),
+              },
+              comprar_em: comprarEm,
+              vender_em: venderEm,
+              spread: `${spread.toFixed(2)}%`,
+              funding_rates: {
+                  [exchange1]: price1.fundingRate ? price1.fundingRate.toFixed(4) : 'N/A',
+                  [exchange2]: price2.fundingRate ? price2.fundingRate.toFixed(4) : 'N/A',
+              },
+              volume: {
+                  [exchange1]: price1.volume ? price1.volume.toFixed(4) : 'N/A',
+                  [exchange2]: price2.volume ? price2.volume.toFixed(4) : 'N/A',
+              }
+          };
+      } catch (error) {
+          this.logger.error('❌ Erro ao buscar arbitragem em tempo real:', error.message);
+          return { error: 'Erro ao processar a solicitação' };
+      }
+    }
+
+
+
+  async getPriceFromExchange2(ativo: string, exchange: string): Promise<{ price: number; fundingRate: number; volume: number }> {
+    try {
+        // ✅ Formatar o ativo corretamente para cada exchange
+        const formattedAtivo = this.formatAtivoForExchange(ativo, exchange);
+        let url = '';
+
+        // ✅ Definir URL para cada exchange
+        switch (exchange.toLowerCase()) {
+            case 'binance':
+                url = `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${formattedAtivo}`;
+                break;
+            case 'mexc':
+                url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
+                break;
+            case 'gate.io':
+                url = `https://api.gateio.ws/api/v4/futures/usdt/tickers`;
+                break;
+            default:
+                this.logger.error(`❌ Exchange ${exchange} não reconhecida.`);
+                return { price: 0, fundingRate: 0, volume: 0 };
+        }
+
+        // ✅ Requisição à API da exchange
+        const response = await axios.get(url, { timeout: 15000 });
+
+        // ✅ Definir o tipo esperado da resposta
+        const data = response.data as any;
+
+        // ✅ Verificar se a API retornou um erro
+        if (!data || typeof data !== 'object') {
+            throw new Error(`❌ Resposta inválida da API ${exchange}`);
+        }
+
+        // ✅ Verificar erros específicos das APIs
+        if ('code' in data && (data.code === -1121 || data.code === 100002)) {
+            throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na ${exchange}`);
+        }
+
+        let price = 0;
+        let fundingRate = 0;
+        let volume = 0;
+
+        // ✅ Extrair dados da resposta da Binance
+        if (exchange.toLowerCase() === 'binance') {
+            price = parseFloat(data.lastPrice || '0');
+            fundingRate = parseFloat(data.fundingRate || '0');
+            volume = parseFloat(data.volume || '0');
+        }
+        // ✅ Extrair dados da resposta da MEXC
+        else if (exchange.toLowerCase() === 'mexc') {
+            if (!data.data || typeof data.data !== 'object') {
+                throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na MEXC`);
+            }
+            price = parseFloat(data.data.lastPrice || '0');
+            fundingRate = parseFloat(data.data.fundingRate || '0');
+            volume = parseFloat(data.data.volume || '0');
+        }
+        // ✅ Extrair dados da resposta da Gate.io
+        else if (exchange.toLowerCase() === 'gate.io') {
+            const gateData = data.find((item: any) => item.contract === formattedAtivo);
+            if (!gateData) {
+                throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na Gate.io`);
+            }
+            price = parseFloat(gateData.last) || 0;
+            fundingRate = parseFloat(gateData.funding_rate) || 0;
+            volume = parseFloat(gateData.volume) || 0;
+        }
+
+        // ✅ Verificar se o preço é válido
+        if (!price || price === 0) {
+            throw new Error(`❌ Ativo ${formattedAtivo} não possui preço válido na ${exchange}`);
+        }
+
+        return { price, fundingRate, volume };
+    } catch (error) {
+        this.logger.error(`❌ Erro ao buscar preço para ${ativo} na ${exchange}: ${error.message}`);
+        return { price: 0, fundingRate: 0, volume: 0 };
+    }
+  }
+
+
+
+  private formatAtivoForExchange(ativo: string, exchange: string): string {
+    switch (exchange.toLowerCase()) {
+        case 'gate.io':
+          return ativo.replace(/(\w+)(USDT)$/, '$1_USDT');
+        case 'mexc':
+            return ativo.replace(/(\w+)(USDT)$/, '$1_USDT'); // Muda "BTCUSDT" para "BTC_USDT"
+        case 'binance':
+            return ativo.toUpperCase(); // Binance exige sem separação
+        default:
+            return ativo.replace('/', ''); // Remove barra para manter padrão
+    }
+  }
+
+
+
   
 }
