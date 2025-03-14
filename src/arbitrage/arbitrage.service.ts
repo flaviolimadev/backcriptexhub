@@ -3,7 +3,7 @@ import axios from 'axios';
 import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import { Ativo } from '../ativos/entities/ativo.entity'; // Importando a entidade Ativo
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Exage } from '../exages/exage.entity';
 import { Prcing  } from '../precing/entities/prcing.entity'; // 🔥 Importando a entidade Precing
@@ -796,18 +796,20 @@ export class ArbitrageService {
       try {
           this.logger.log('🔍 Analisando oportunidades de arbitragem...');
   
-          // 🔥 Buscar apenas os dados essenciais do banco para reduzir a carga
+          // 🔥 Buscar apenas os preços recentes do banco de dados (últimos 60 segundos)
           const precings = await this.prcingRepository.find({
               select: ['precing', 'updated_at'],
+              where: { updated_at: MoreThan(new Date(Date.now() - 60 * 1000)) }, // Apenas preços recentes
               relations: ['ativo', 'exage'],
           });
   
           if (precings.length === 0) {
-              this.logger.warn('⚠️ Nenhum dado de preço disponível para análise.');
+              this.logger.warn('⚠️ Nenhum dado de preço recente disponível para análise.');
               return [];
           }
   
           const precingsByAtivo = new Map<string, any[]>();
+  
           for (const p of precings) {
               const ativoName = p.ativo.name;
               if (!precingsByAtivo.has(ativoName)) {
@@ -817,16 +819,24 @@ export class ArbitrageService {
           }
   
           const oportunidades: any[] = [];
-          const agora = Date.now(); // Calcula apenas uma vez
+          const agora = Date.now(); // Timestamp atual
   
           for (const [ativo, precings] of precingsByAtivo.entries()) {
               if (precings.length < 2) continue; // Ignora ativos sem ao menos 2 preços
   
-              // 🔥 Encontrar menor (compra) e maior (venda) preço de forma eficiente
-              let compra = precings[0];
-              let venda = precings[0];
+              // 🔥 Buscar preços atualizados nas corretoras para esse ativo
+              const pricesPromises = precings.map(async (p) => {
+                  const updatedPrice = await this.getPriceFromExchange(ativo, p.exage.name);
+                  return { ...p, precing: updatedPrice.price || p.precing }; // Atualiza se a API responder corretamente
+              });
   
-              for (const p of precings) {
+              const precingsAtualizados = await Promise.all(pricesPromises);
+  
+              // 🔥 Encontrar menor (compra) e maior (venda) preço
+              let compra = precingsAtualizados[0];
+              let venda = precingsAtualizados[0];
+  
+              for (const p of precingsAtualizados) {
                   if (Number(p.precing) < Number(compra.precing)) compra = p;
                   if (Number(p.precing) > Number(venda.precing)) venda = p;
               }
@@ -837,33 +847,26 @@ export class ArbitrageService {
               const precoCompra = Number(compra.precing);
               const precoVenda = Number(venda.precing);
               const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
-
-              // 🔥 Calcula a atualização apenas uma vez
-              const agora = new Date().getTime();
+  
+              // 🔥 Tempo desde a última atualização
               const atualizadoSegundos = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
-
+  
               let atualizadoFormatado: string;
-
               if (atualizadoSegundos < 60) {
                   atualizadoFormatado = `${atualizadoSegundos} segundos atrás`;
               } else if (atualizadoSegundos < 3600) {
                   const minutos = Math.floor(atualizadoSegundos / 60);
-                  const segundos = atualizadoSegundos % 60;
-                  atualizadoFormatado = `${minutos} minutos e ${segundos} segundos atrás`;
-              } else if (atualizadoSegundos < 86400) {
-                  const horas = Math.floor(atualizadoSegundos / 3600);
-                  const minutos = Math.floor((atualizadoSegundos % 3600) / 60);
-                  atualizadoFormatado = `${horas} horas e ${minutos} minutos atrás`;
+                  atualizadoFormatado = `${minutos} minutos atrás`;
               } else {
-                  const dias = Math.floor(atualizadoSegundos / 86400);
-                  const horas = Math.floor((atualizadoSegundos % 86400) / 3600);
-                  atualizadoFormatado = `${dias} dias e ${horas} horas atrás`;
+                  const horas = Math.floor(atualizadoSegundos / 3600);
+                  atualizadoFormatado = `${horas} horas atrás`;
               }
   
-              // 🔥 Gerar os links para o ativo nas exchanges envolvidas
+              // 🔥 Gerar os links para as exchanges envolvidas
               const link_01 = this.generateExchangeLink(compra.exage.name, ativo);
               const link_02 = this.generateExchangeLink(venda.exage.name, ativo);
   
+              // 🔥 Adiciona à lista de oportunidades
               oportunidades.push({
                   Moeda: ativo,
                   Compra: compra.exage.name,
@@ -871,7 +874,7 @@ export class ArbitrageService {
                   Precing_Compra: precoCompra.toFixed(4),
                   Precing_Venda: precoVenda.toFixed(4),
                   Spread: spread.toFixed(2) + '%',
-                  Atualizado: `${atualizadoFormatado} segundos atrás`,
+                  Atualizado: atualizadoFormatado,
                   link_01,
                   link_02,
               });
@@ -884,6 +887,7 @@ export class ArbitrageService {
           return [];
       }
   }
+  
 
 
     // 🔥 Função auxiliar para gerar os links dinâmicos das corretoras
