@@ -28,6 +28,7 @@ import {
   
     @Column({ type: "decimal", precision: 18, scale: 2 })
     volum: number;
+    
   
     @Column({ default: 1 }) // 1 - Disponível, 0 - Indisponível
     status: number;

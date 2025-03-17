@@ -100,10 +100,7 @@ export class ArbitrageService {
   private mexcAPI = 'https://contract.mexc.com/api/v1/contract/ticker'; // API de preços futuros MEXC
   private mexcContractsAPI = 'https://contract.mexc.com/api/v1/contract/detail'; // API de contratos futuros MEXC
 
-
-  private bitgetTickersAPI = 'https://api.bitget.com/api/v2/mix/market/tickers';
-  private bitgetContractsAPI = 'https://api.bitget.com/api/v2/mix/market/contracts';
-  private marketType = 'umcbl'; // 🔥 Correto para USDT-Margined Futures na Bitget
+  private readonly bitgetAPI = 'https://api.bitget.com/api/mix/v1/market/ticker?symbol=';
 
   private binanceFuturesAPI = 'https://fapi.binance.com/fapi/v1/ticker/24hr';
   private binanceContractsAPI = 'https://fapi.binance.com/fapi/v1/exchangeInfo';
@@ -200,7 +197,7 @@ export class ArbitrageService {
     return opportunities;
     }
 
-    @Cron('*/30 * * * * *')  // 🔥 Executa a cada 30 segundos
+    @Cron('*/60 * * * * *')  // 🔥 Executa a cada 30 segundos
     async getGateIoFuturesPrices(): Promise<any[]> {
         try {
             this.logger.log('🔍 Buscando preços futuros da Gate.io...');
@@ -370,7 +367,7 @@ export class ArbitrageService {
     }
       
 
-    @Cron('*/30 * * * * *')  // 🔥 Executa a cada 30 segundos
+    @Cron('*/60 * * * * *')  // 🔥 Executa a cada 30 segundos
     async getMexcFuturesPrices(): Promise<any[]> {
         try {
             this.logger.log('🔍 Buscando preços futuros da MEXC...');
@@ -540,38 +537,112 @@ export class ArbitrageService {
     }
       
 
-    async getBitgetFuturesPrices(): Promise<BitgetTicker[]> {
-    const timestamp = String(Date.now());
-    const productType = 'umcbl'; // 🔥 Definindo explicitamente o tipo de mercado
-
-    try {
-        console.log(`🔍 Buscando dados da Bitget com productType=${productType}...`);
-
-        const response = await axios.get<BitgetApiResponse<BitgetTicker[]>>(this.bitgetTickersAPI, {
-        params: { productType }, // 🔥 Garantindo que 'productType' não está vazio
-        headers: {
-            'ACCESS-KEY': BITGET_API_KEY!,
-            'ACCESS-SIGN': this.generateSignature(timestamp),
-            'ACCESS-TIMESTAMP': timestamp,
-            'ACCESS-PASSPHRASE': BITGET_PASSPHRASE!,
-            'Content-Type': 'application/json',
-        },
-        });
-
-        if (response.data.code === '00000') {
-        console.log(`✅ Sucesso ao buscar dados da Bitget.`);
-        return response.data.data;
+    @Cron('*/60 * * * * *')  // 🔥 Executa a cada 30 segundos
+    async getBitgetFuturesPrices(): Promise<any> {
+        try {
+            this.logger.log('🔍 Buscando preços futuros da Bitget...');
+    
+            const axiosConfig = {
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000,
+            };
+    
+            // 🔥 Buscar os ativos cadastrados no banco de dados
+            const ativos = await this.ativosRepository.find({ 
+                select: ['id', 'name'], 
+                where: { status: 1 } 
+            });
+    
+            if (ativos.length === 0) {
+                this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na Bitget.');
+                return { success: false, message: 'Nenhum ativo encontrado' };
+            }
+    
+            // 🔥 Buscar a exchange Bitget
+            const exage = await this.exageRepository.findOne({ where: { id: 5 } });
+            if (!exage) {
+                this.logger.error('❌ Erro: Exchange Bitget não encontrada no banco de dados.');
+                return { success: false, message: 'Exchange não encontrada' };
+            }
+    
+            const now = new Date();
+            now.setSeconds(0, 0);
+    
+            for (const ativo of ativos) {
+                const symbol = `${ativo.name}_UMCBL`;
+                const url = `https://api.bitget.com/api/mix/v1/market/ticker?symbol=${symbol}`;
+    
+                try {
+                    const response = await axios.get<{ data: { last: string; quoteVolume: string } }>(
+                        url, axiosConfig
+                    );
+    
+                    const priceData = response.data.data;
+                    if (!priceData?.last || !priceData?.quoteVolume) {
+                        this.logger.warn(`⚠️ Dados ausentes para ${symbol}: ${JSON.stringify(priceData)}`);
+                        continue;
+                    }
+    
+                    const lastPrice = parseFloat(priceData.last) || 0;
+                    const volume = parseFloat(priceData.quoteVolume) || 0;
+    
+                    const existingPrcing = await this.prcingRepository.findOne({
+                        select: ['id', 'precing'],
+                        where: { ativo: { id: ativo.id }, exage: { id: exage.id } },
+                    });
+    
+                    if (existingPrcing) {
+                        await this.prcingRepository.update(existingPrcing.id, {
+                            precing: lastPrice,
+                            volum: volume, // Correção aqui
+                            updated_at: now,
+                        });
+                    } else {
+                        await this.prcingRepository.insert({
+                            ativo: { id: ativo.id },
+                            exage: { id: exage.id },
+                            precing: lastPrice,
+                            type: 1,
+                            volum: volume, // Correção aqui
+                            status: 1,
+                            created_at: now,
+                            updated_at: now,
+                        });
+                    }
+    
+                    const existingHistory = await this.prcingHistoryRepository.findOne({
+                        where: { ativo: { id: ativo.id }, exage: { id: exage.id }, timestamp: now },
+                    });
+    
+                    if (existingHistory) {
+                        await this.prcingHistoryRepository.update(existingHistory.id, {
+                            precing: lastPrice,
+                            timestamp: now,
+                        });
+                    } else {
+                        await this.prcingHistoryRepository.insert({
+                            ativo: { id: ativo.id },
+                            exage: { id: exage.id },
+                            precing: lastPrice,
+                            timestamp: now,
+                        });
+                    }
+                } catch (error) {
+                    this.logger.error(`❌ Erro ao buscar preço para ${symbol}: ${error.message}`);
+                }
+            }
+    
+            this.logger.log(`✅ Bitget: Preços atualizados para ${ativos.length} ativos.`);
+            return { success: true, updated: ativos.length };
+    
+        } catch (error) {
+            this.logger.error(`❌ Erro ao buscar preços futuros da Bitget: ${error.message}`);
+            return { success: false, error: error.message };
         }
-
-        console.warn(`⚠️ Erro ao buscar dados:`, response.data.msg);
-        return [];
-    } catch (error) {
-        console.error(`❌ Erro ao buscar dados da Bitget:`, error.response?.data || error.message);
-        return [];
     }
-    }
+    
 
-    @Cron('*/30 * * * * *')  // 🔥 Executa a cada 30 segundos
+    @Cron('*/60 * * * * *')  // 🔥 Executa a cada 30 segundos
     async getBinanceFuturesPrices(): Promise<BinancePrice[]> {
         try {
             this.logger.log('🔍 Buscando preços da Binance...');
@@ -730,260 +801,303 @@ export class ArbitrageService {
     }
     
 
-    async getHtxFuturesPrices(): Promise<any[]> {
-    try {
-        console.log('🔍 Buscando preços da HTX (Huobi Futuros USDT-M)...');
+    @Cron('*/60 * * * * *')  // 🔥 Executa a cada 30 segundos
+    async getHtxFuturesPrices(): Promise<any> {
+        try {
+            this.logger.log('🔍 Buscando preços futuros da HTX...');
 
-        // 🔥 Buscar preços dos ativos futuros da HTX
-        const response = await axios.get<{ data: any[] }>('https://api.huobi.pro/market/tickers');
-        const pricesData = (response.data as { data: any[] }).data || [];
+            const axiosConfig = {
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000,
+            };
 
-        // 🔥 Buscar os contratos futuros para pegar volume mínimo e máximo
-        const contractsResponse = await axios.get<{ data: any[] }>('https://api.hbdm.com/api/v1/contract_contract_info');
-        const contractsData = (contractsResponse.data as { data: any[] }).data || [];
+            // 🔥 Buscar os ativos cadastrados no banco de dados
+            const ativos = await this.ativosRepository.find({
+                select: ['id', 'name'],
+                where: { status: 1 }
+            });
 
-        // 🔥 Lista de moedas de interesse
-        const coinsOfInterest = ['BTC-USDT', 'ETH-USDT', 'BNB-USDT', 'ADA-USDT'];
-
-        // 🔥 Criar um mapa de volumes mínimos e máximos para consulta rápida
-        interface HtxContractInfo {
-        min_size: string;
-        max_size: string;
-        min_notional: string;
-        }
-
-        const contractMap = new Map<string, HtxContractInfo>(
-        contractsData.map(contract => [
-            contract.symbol,
-            {
-            min_size: contract.contract_size || "N/A",   // 🔥 Volume mínimo em moeda
-            max_size: contract.max_order_limit || "N/A", // 🔥 Volume máximo em moeda
-            min_notional: contract.min_order_limit || "N/A", // 🔥 Volume mínimo em USDT
+            if (ativos.length === 0) {
+                this.logger.warn('⚠️ Nenhum ativo cadastrado para buscar preços na HTX.');
+                return { success: false, message: 'Nenhum ativo encontrado' };
             }
-        ])
-        );
 
-        // 🔥 Filtrar os pares desejados e incluir volume mínimo/máximo
-        return pricesData
-        .filter((item) => coinsOfInterest.includes(item.symbol))
-        .map((item) => {
-            const contractInfo: HtxContractInfo = contractMap.get(item.symbol) || {
-            min_size: "N/A",
-            max_size: "N/A",
-            min_notional: "N/A",
-            };
+            // 🔥 Buscar a exchange HTX
+            const exage = await this.exageRepository.findOne({ where: { id: 4 } }); // ID da HTX
+            if (!exage) {
+                this.logger.error('❌ Erro: Exchange HTX não encontrada no banco de dados.');
+                return { success: false, message: 'Exchange não encontrada' };
+            }
 
-            return {
-            pair: item.symbol.replace('-', '/'),
-            last_price: item.close,
-            highest_price_24h: item.high,
-            lowest_price_24h: item.low,
-            change_24h: item.change,
-            min_size: contractInfo.min_size,
-            max_size: contractInfo.max_size,
-            min_notional: contractInfo.min_notional,
-            };
-        });
+            const now = new Date();
+            now.setSeconds(0, 0);
 
-    } catch (error) {
-        console.error('❌ Erro ao buscar preços da HTX:', error.response?.data || error.message);
-        return [];
+            for (const ativo of ativos) {
+                const symbol = ativo.name.replace(/(USDT|USDC|BUSD)$/, '-$1'); // Converte "BTCUSDT" para "BTC-USDT"
+                const url = `https://api.hbdm.com/linear-swap-ex/market/detail/merged?contract_code=${symbol}`;
+
+                try {
+                    const response = await axios.get<{ tick: { close: number; vol: number } }>(
+                        url, axiosConfig
+                    );
+
+                    const priceData = response.data.tick;
+                    if (!priceData?.close || !priceData?.vol) {
+                        this.logger.warn(`⚠️ Dados ausentes para ${symbol}: ${JSON.stringify(priceData)}`);
+                        continue;
+                    }
+
+                    const lastPrice = priceData.close || 0;
+                    const volume = priceData.vol || 0;
+
+                    const existingPrcing = await this.prcingRepository.findOne({
+                        select: ['id', 'precing'],
+                        where: { ativo: { id: ativo.id }, exage: { id: exage.id } },
+                    });
+
+                    if (existingPrcing) {
+                        await this.prcingRepository.update(existingPrcing.id, {
+                            precing: lastPrice,
+                            volum: volume,
+                            updated_at: now,
+                        });
+                    } else {
+                        await this.prcingRepository.insert({
+                            ativo: { id: ativo.id },
+                            exage: { id: exage.id },
+                            precing: lastPrice,
+                            type: 1,
+                            volum: volume,
+                            status: 1,
+                            created_at: now,
+                            updated_at: now,
+                        });
+                    }
+
+                    const existingHistory = await this.prcingHistoryRepository.findOne({
+                        where: { ativo: { id: ativo.id }, exage: { id: exage.id }, timestamp: now },
+                    });
+
+                    if (existingHistory) {
+                        await this.prcingHistoryRepository.update(existingHistory.id, {
+                            precing: lastPrice,
+                            timestamp: now,
+                        });
+                    } else {
+                        await this.prcingHistoryRepository.insert({
+                            ativo: { id: ativo.id },
+                            exage: { id: exage.id },
+                            precing: lastPrice,
+                            timestamp: now,
+                        });
+                    }
+                } catch (error) {
+                    this.logger.error(`❌ Erro ao buscar preço para ${symbol}: ${error.message}`);
+                }
+            }
+
+            this.logger.log(`✅ HTX: Preços atualizados para ${ativos.length} ativos.`);
+            return { success: true, updated: ativos.length };
+
+        } catch (error) {
+            this.logger.error(`❌ Erro ao buscar preços futuros da HTX: ${error.message}`);
+            return { success: false, error: error.message };
+        }
     }
-    }
 
 
-async getArbitrageOpportunities(): Promise<any[]> {
-    try {
-        this.logger.log('🔍 Analisando oportunidades de arbitragem...');
+    async getArbitrageOpportunities(): Promise<any[]> {
+        try {
+            this.logger.log('🔍 Analisando oportunidades de arbitragem...');
 
-        // 🔥 Buscar apenas os preços recentes do banco de dados (últimos 60 segundos)
-        const precings = await this.prcingRepository.find({
-            select: ['precing', 'updated_at'],
-            where: { updated_at: MoreThan(new Date(Date.now() - 60 * 1000)) }, // Apenas preços recentes
-            relations: ['ativo', 'exage'],
-        });
+            // 🔥 Buscar apenas os preços recentes do banco de dados (últimos 60 segundos)
+            const precings = await this.prcingRepository.find({
+                select: ['precing', 'updated_at'],
+                where: { updated_at: MoreThan(new Date(Date.now() - 60 * 1000)) }, // Apenas preços recentes
+                relations: ['ativo', 'exage'],
+            });
 
-        if (precings.length === 0) {
-            this.logger.warn('⚠️ Nenhum dado de preço recente disponível para análise.');
+            if (precings.length === 0) {
+                this.logger.warn('⚠️ Nenhum dado de preço recente disponível para análise.');
+                return [];
+            }
+
+            // 🔥 Organizar os preços por ativo
+            const precingsByAtivo = new Map<string, any[]>();
+
+            for (const p of precings) {
+                const ativoName = p.ativo.name;
+                if (!precingsByAtivo.has(ativoName)) {
+                    precingsByAtivo.set(ativoName, []);
+                }
+                precingsByAtivo.get(ativoName)!.push(p);
+            }
+
+            const oportunidades: any[] = [];
+            const agora = Date.now(); // Timestamp atual
+
+            for (const [ativo, precings] of precingsByAtivo.entries()) {
+                if (precings.length < 2) continue; // Ignora ativos sem ao menos 2 preços
+
+                // 🔥 Buscar preços atualizados nas corretoras para esse ativo
+                const pricesPromises = precings.map(async (p) => {
+                    const updatedPrice = await this.getPriceFromExchange(ativo, p.exage.name);
+                    return {
+                        ...p,
+                        precing: updatedPrice.price && updatedPrice.price > 0 ? updatedPrice.price : p.precing, // Se não obtiver preço atualizado, usa o do banco
+                    };
+                });
+
+                const precingsAtualizados = await Promise.all(pricesPromises);
+
+                // 🔥 Encontrar menor (compra) e maior (venda) preço
+                let compra = precingsAtualizados[0];
+                let venda = precingsAtualizados[0];
+
+                for (const p of precingsAtualizados) {
+                    if (Number(p.precing) < Number(compra.precing)) compra = p;
+                    if (Number(p.precing) > Number(venda.precing)) venda = p;
+                }
+
+                // 🔥 Se não há spread positivo, ignora a oportunidade
+                if (Number(compra.precing) >= Number(venda.precing)) continue;
+
+                const precoCompra = Number(compra.precing);
+                const precoVenda = Number(venda.precing);
+                const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
+
+                // 🔥 Tempo desde a última atualização
+                const atualizadoSegundos = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
+
+                let atualizadoFormatado: string;
+                if (atualizadoSegundos < 60) {
+                    atualizadoFormatado = `${atualizadoSegundos} segundos atrás`;
+                } else if (atualizadoSegundos < 3600) {
+                    const minutos = Math.floor(atualizadoSegundos / 60);
+                    atualizadoFormatado = `${minutos} minutos atrás`;
+                } else {
+                    const horas = Math.floor(atualizadoSegundos / 3600);
+                    atualizadoFormatado = `${horas} horas atrás`;
+                }
+
+                // 🔥 Gerar os links para as exchanges envolvidas
+                const link_01 = this.generateExchangeLink(compra.exage.name, ativo);
+                const link_02 = this.generateExchangeLink(venda.exage.name, ativo);
+
+                // 🔥 Adiciona à lista de oportunidades
+                oportunidades.push({
+                    Moeda: ativo,
+                    Compra: compra.exage.name,
+                    Venda: venda.exage.name,
+                    Precing_Compra: precoCompra.toFixed(4),
+                    Precing_Venda: precoVenda.toFixed(4),
+                    Spread: spread.toFixed(2) + '%',
+                    Atualizado: atualizadoFormatado,
+                    link_01,
+                    link_02,
+                });
+            }
+
+            this.logger.log(`✅ Oportunidades encontradas: ${oportunidades.length}`);
+            return oportunidades;
+        } catch (error) {
+            this.logger.error(`❌ Erro ao calcular oportunidades de arbitragem: ${error.message}`);
             return [];
         }
-
-        // 🔥 Organizar os preços por ativo
-        const precingsByAtivo = new Map<string, any[]>();
-
-        for (const p of precings) {
-            const ativoName = p.ativo.name;
-            if (!precingsByAtivo.has(ativoName)) {
-                precingsByAtivo.set(ativoName, []);
-            }
-            precingsByAtivo.get(ativoName)!.push(p);
-        }
-
-        const oportunidades: any[] = [];
-        const agora = Date.now(); // Timestamp atual
-
-        for (const [ativo, precings] of precingsByAtivo.entries()) {
-            if (precings.length < 2) continue; // Ignora ativos sem ao menos 2 preços
-
-            // 🔥 Buscar preços atualizados nas corretoras para esse ativo
-            const pricesPromises = precings.map(async (p) => {
-                const updatedPrice = await this.getPriceFromExchange(ativo, p.exage.name);
-                return {
-                    ...p,
-                    precing: updatedPrice.price && updatedPrice.price > 0 ? updatedPrice.price : p.precing, // Se não obtiver preço atualizado, usa o do banco
-                };
-            });
-
-            const precingsAtualizados = await Promise.all(pricesPromises);
-
-            // 🔥 Encontrar menor (compra) e maior (venda) preço
-            let compra = precingsAtualizados[0];
-            let venda = precingsAtualizados[0];
-
-            for (const p of precingsAtualizados) {
-                if (Number(p.precing) < Number(compra.precing)) compra = p;
-                if (Number(p.precing) > Number(venda.precing)) venda = p;
-            }
-
-            // 🔥 Se não há spread positivo, ignora a oportunidade
-            if (Number(compra.precing) >= Number(venda.precing)) continue;
-
-            const precoCompra = Number(compra.precing);
-            const precoVenda = Number(venda.precing);
-            const spread = ((precoVenda - precoCompra) / precoCompra) * 100;
-
-            // 🔥 Tempo desde a última atualização
-            const atualizadoSegundos = Math.floor((agora - new Date(compra.updated_at).getTime()) / 1000);
-
-            let atualizadoFormatado: string;
-            if (atualizadoSegundos < 60) {
-                atualizadoFormatado = `${atualizadoSegundos} segundos atrás`;
-            } else if (atualizadoSegundos < 3600) {
-                const minutos = Math.floor(atualizadoSegundos / 60);
-                atualizadoFormatado = `${minutos} minutos atrás`;
-            } else {
-                const horas = Math.floor(atualizadoSegundos / 3600);
-                atualizadoFormatado = `${horas} horas atrás`;
-            }
-
-            // 🔥 Gerar os links para as exchanges envolvidas
-            const link_01 = this.generateExchangeLink(compra.exage.name, ativo);
-            const link_02 = this.generateExchangeLink(venda.exage.name, ativo);
-
-            // 🔥 Adiciona à lista de oportunidades
-            oportunidades.push({
-                Moeda: ativo,
-                Compra: compra.exage.name,
-                Venda: venda.exage.name,
-                Precing_Compra: precoCompra.toFixed(4),
-                Precing_Venda: precoVenda.toFixed(4),
-                Spread: spread.toFixed(2) + '%',
-                Atualizado: atualizadoFormatado,
-                link_01,
-                link_02,
-            });
-        }
-
-        this.logger.log(`✅ Oportunidades encontradas: ${oportunidades.length}`);
-        return oportunidades;
-    } catch (error) {
-        this.logger.error(`❌ Erro ao calcular oportunidades de arbitragem: ${error.message}`);
-        return [];
     }
-}
 
-async getPriceFromExchange(ativo: string, exchange: string): Promise<{ price: number; fundingRate: number; volume: number }> {
-  try {
-      let url = '';
-      let priceKey = '';
-      let fundingRateKey = '';
-      let volumeKey = '';
+    async getPriceFromExchange(ativo: string, exchange: string): Promise<{ price: number; fundingRate: number; volume: number }> {
+    try {
+        let url = '';
+        let priceKey = '';
+        let fundingRateKey = '';
+        let volumeKey = '';
 
-      // 🔥 Ajustar formato do ativo para corretoras específicas
-      const formattedAtivo =
-          exchange.toLowerCase() === 'Gate.io' || exchange.toLowerCase() === 'MEXC'
-              ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT')
-              : ativo;
+        // 🔥 Ajustar formato do ativo para corretoras específicas
+        const formattedAtivo =
+            exchange.toLowerCase() === 'Gate.io' || exchange.toLowerCase() === 'MEXC'
+                ? ativo.replace(/(\w+)(USDT)$/, '$1_USDT')
+                : ativo;
 
-      switch (exchange.toLowerCase()) {
-          case 'Binance':
-              url = `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${formattedAtivo}`;
-              priceKey = 'lastPrice';
-              fundingRateKey = 'fundingRate';
-              volumeKey = 'volume';
-              break;
-          case 'Gate.io':
-              url = `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${formattedAtivo}`;
-              priceKey = 'last';
-              fundingRateKey = 'funding_rate';
-              volumeKey = 'volume';
-              break;
-          case 'MEXC':
-              url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
-              priceKey = 'data.lastPrice';
-              fundingRateKey = 'data.fundingRate';
-              volumeKey = 'data.volume';
-              break;
-          case 'bitget':
-              url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${formattedAtivo}`;
-              priceKey = 'last';
-              fundingRateKey = 'fundingRate';
-              volumeKey = 'volume';
-              break;
-          case 'htx':
-              url = `https://api.huobi.pro/market/detail/merged?symbol=${formattedAtivo.toLowerCase()}`;
-              priceKey = 'close';
-              fundingRateKey = 'fundingRate';
-              volumeKey = 'vol';
-              break;
-          default:
-              this.logger.error(`❌ Exchange ${exchange} não reconhecida.`);
-              return { price: 0, fundingRate: 0, volume: 0 };
-      }
+        switch (exchange.toLowerCase()) {
+            case 'Binance':
+                url = `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${formattedAtivo}`;
+                priceKey = 'lastPrice';
+                fundingRateKey = 'fundingRate';
+                volumeKey = 'volume';
+                break;
+            case 'Gate.io':
+                url = `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${formattedAtivo}`;
+                priceKey = 'last';
+                fundingRateKey = 'funding_rate';
+                volumeKey = 'volume';
+                break;
+            case 'MEXC':
+                url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
+                priceKey = 'data.lastPrice';
+                fundingRateKey = 'data.fundingRate';
+                volumeKey = 'data.volume';
+                break;
+            case 'bitget':
+                url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${formattedAtivo}`;
+                priceKey = 'last';
+                fundingRateKey = 'fundingRate';
+                volumeKey = 'volume';
+                break;
+            case 'htx':
+                url = `https://api.huobi.pro/market/detail/merged?symbol=${formattedAtivo.toLowerCase()}`;
+                priceKey = 'close';
+                fundingRateKey = 'fundingRate';
+                volumeKey = 'vol';
+                break;
+            default:
+                this.logger.error(`❌ Exchange ${exchange} não reconhecida.`);
+                return { price: 0, fundingRate: 0, volume: 0 };
+        }
 
-      let attempts = 3; // 🔥 Tentativas de reexecução
-      while (attempts > 0) {
-          try {
-              const response = await axios.get(url, { timeout: 15000 }); // 🔥 Timeout de 15s
-              const data = response.data as any;
+        let attempts = 3; // 🔥 Tentativas de reexecução
+        while (attempts > 0) {
+            try {
+                const response = await axios.get(url, { timeout: 15000 }); // 🔥 Timeout de 15s
+                const data = response.data as any;
 
-              if (exchange.toLowerCase() === 'gate.io') {
-                  const filteredData = data.find((item: any) => item.contract === formattedAtivo);
-                  if (!filteredData) {
-                      throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na Gate.io`);
-                  }
-                  return {
-                      price: parseFloat(filteredData[priceKey] || '0'),
-                      fundingRate: parseFloat(filteredData[fundingRateKey] || '0'),
-                      volume: parseFloat(filteredData[volumeKey] || '0'),
-                  };
-              }
+                if (exchange.toLowerCase() === 'gate.io') {
+                    const filteredData = data.find((item: any) => item.contract === formattedAtivo);
+                    if (!filteredData) {
+                        throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na Gate.io`);
+                    }
+                    return {
+                        price: parseFloat(filteredData[priceKey] || '0'),
+                        fundingRate: parseFloat(filteredData[fundingRateKey] || '0'),
+                        volume: parseFloat(filteredData[volumeKey] || '0'),
+                    };
+                }
 
-              // 🔥 A MEXC coloca os dados dentro de um objeto `data`
-              return {
-                  price: parseFloat(priceKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
-                  fundingRate: parseFloat(fundingRateKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
-                  volume: parseFloat(volumeKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
-              };
-          } catch (error) {
-              if (error.code === 'ECONNRESET' || error.message.includes('socket hang up')) {
-                  this.logger.warn(`⚠️ Timeout na ${exchange}. Tentando novamente... (${3 - attempts + 1}/3)`);
-                  attempts--;
-                  await new Promise((res) => setTimeout(res, 2000)); // 🔥 Espera antes de tentar de novo
-                  continue;
-              }
-              this.logger.error(`❌ Erro ao buscar preço para ${ativo} na ${exchange}:`, error.message);
-              return { price: 0, fundingRate: 0, volume: 0 };
-          }
-      }
+                // 🔥 A MEXC coloca os dados dentro de um objeto `data`
+                return {
+                    price: parseFloat(priceKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
+                    fundingRate: parseFloat(fundingRateKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
+                    volume: parseFloat(volumeKey.split('.').reduce((o, k) => (o || {})[k], data) || '0'),
+                };
+            } catch (error) {
+                if (error.code === 'ECONNRESET' || error.message.includes('socket hang up')) {
+                    this.logger.warn(`⚠️ Timeout na ${exchange}. Tentando novamente... (${3 - attempts + 1}/3)`);
+                    attempts--;
+                    await new Promise((res) => setTimeout(res, 2000)); // 🔥 Espera antes de tentar de novo
+                    continue;
+                }
+                this.logger.error(`❌ Erro ao buscar preço para ${ativo} na ${exchange}:`, error.message);
+                return { price: 0, fundingRate: 0, volume: 0 };
+            }
+        }
 
-      this.logger.error(`❌ Falha ao buscar preço na ${exchange} após múltiplas tentativas.`);
-      return { price: 0, fundingRate: 0, volume: 0 };
-  } catch (error) {
-      this.logger.error(`❌ Erro inesperado ao buscar preço para ${ativo} na ${exchange}:`, error.message);
-      return { price: 0, fundingRate: 0, volume: 0 };
-  }
-  }
+        this.logger.error(`❌ Falha ao buscar preço na ${exchange} após múltiplas tentativas.`);
+        return { price: 0, fundingRate: 0, volume: 0 };
+    } catch (error) {
+        this.logger.error(`❌ Erro inesperado ao buscar preço para ${ativo} na ${exchange}:`, error.message);
+        return { price: 0, fundingRate: 0, volume: 0 };
+    }
+    }
 
 
     // 🔥 Função auxiliar para gerar os links dinâmicos das corretoras
