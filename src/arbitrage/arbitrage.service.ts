@@ -1326,6 +1326,9 @@ export class ArbitrageService {
             case 'mexc':
                 url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
                 break;
+            case 'bitget':
+                url = `https://api.bitget.com/api/mix/v1/market/ticker?symbol=${ativo}_UMCBL`;
+                break;
             case 'gate.io':
                 url = `https://api.gateio.ws/api/v4/futures/usdt/tickers`;
                 break;
@@ -1369,6 +1372,16 @@ export class ArbitrageService {
             fundingRate = parseFloat(data.data.fundingRate || '0');
             volume = parseFloat(data.data.volume || '0');
         }
+
+         // ✅ Extrair dados da resposta da MEXC
+         else if (exchange.toLowerCase() === 'bitget') {
+            if (!data.data || typeof data.data !== 'object') {
+                throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na bitget`);
+            }
+            price = parseFloat(data.data.lastPrice || '0');
+            fundingRate = parseFloat(data.data.fundingRate || '0');
+            volume = parseFloat(data.data.volume || '0');
+        }
         // ✅ Extrair dados da resposta da Gate.io
         else if (exchange.toLowerCase() === 'gate.io') {
             const gateData = data.find((item: any) => item.contract === formattedAtivo);
@@ -1399,6 +1412,8 @@ export class ArbitrageService {
         case 'gate.io':
           return ativo.replace(/(\w+)(USDT)$/, '$1_USDT');
         case 'mexc':
+            return ativo.replace(/(\w+)(USDT)$/, '$1_USDT'); // Muda "BTCUSDT" para "BTC_USDT"
+        case 'bitget':
             return ativo.replace(/(\w+)(USDT)$/, '$1_USDT'); // Muda "BTCUSDT" para "BTC_USDT"
         case 'binance':
             return ativo.toUpperCase(); // Binance exige sem separação
