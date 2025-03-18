@@ -1327,7 +1327,7 @@ export class ArbitrageService {
                 url = `https://contract.mexc.com/api/v1/contract/ticker?symbol=${formattedAtivo}`;
                 break;
             case 'bitget':
-                url = `https://api.bitget.com/api/mix/v1/market/ticker?symbol=${ativo}_UMCBL`;
+                url = `https://api.bitget.com/api/mix/v1/market/ticker?symbol=${formattedAtivo}`;
                 break;
             case 'gate.io':
                 url = `https://api.gateio.ws/api/v4/futures/usdt/tickers`;
@@ -1373,14 +1373,15 @@ export class ArbitrageService {
             volume = parseFloat(data.data.volume || '0');
         }
 
-         // ✅ Extrair dados da resposta da MEXC
-         else if (exchange.toLowerCase() === 'bitget') {
+         // ✅ Extrair dados da resposta da Bitget
+        else if (exchange.toLowerCase() === 'bitget') {
             if (!data.data || typeof data.data !== 'object') {
-                throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na bitget`);
+                throw new Error(`❌ Ativo ${formattedAtivo} não encontrado na Bitget`);
             }
-            price = parseFloat(data.data.lastPrice || '0');
-            fundingRate = parseFloat(data.data.fundingRate || '0');
-            volume = parseFloat(data.data.volume || '0');
+
+            price = parseFloat(data.data.last || '0'); // ✅ Extrai o preço atual
+            fundingRate = parseFloat(data.data.fundingRate || '0'); // ✅ Extrai a taxa de financiamento
+            volume = parseFloat(data.data.baseVolume || '0'); // ✅ Extrai o volume da base
         }
         // ✅ Extrair dados da resposta da Gate.io
         else if (exchange.toLowerCase() === 'gate.io') {
@@ -1414,7 +1415,8 @@ export class ArbitrageService {
         case 'mexc':
             return ativo.replace(/(\w+)(USDT)$/, '$1_USDT'); // Muda "BTCUSDT" para "BTC_USDT"
         case 'bitget':
-            return ativo.replace(/(\w+)(USDT)$/, '$1_USDT'); // Muda "BTCUSDT" para "BTC_USDT"
+            return ativo.replace(/(\w+)(USDT)$/, '$1USDT_UMCBL'); // Transforma "BTCUSDT" em "BTCUSDT_UMCBL"
+            
         case 'binance':
             return ativo.toUpperCase(); // Binance exige sem separação
         default:
