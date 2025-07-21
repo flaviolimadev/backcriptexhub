@@ -16,6 +16,7 @@ import { AulaModule } from './aulas/aula.module';
 import { ComentarioModule } from './comentarios/comentario.module';
 import { AcoesAulaModule } from './acoes_aula/acoes_aula.module';
 import { AcoesComentarioModule } from './acoes_comentario/acoes_comentario.module';
+import { PrcingHistoryModule } from './precingHistory/prcingHistory.module';
 
 @Module({
   imports: [
@@ -41,7 +42,8 @@ import { AcoesComentarioModule } from './acoes_comentario/acoes_comentario.modul
     AulaModule,
     ComentarioModule,
     AcoesAulaModule,
-    AcoesComentarioModule
+    AcoesComentarioModule,
+    PrcingHistoryModule
   ],
   controllers: [AppController],
   providers: [AppService],

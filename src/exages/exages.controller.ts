@@ -2,7 +2,7 @@ import { Controller, Get, Post, Put, Delete, Param, Body } from "@nestjs/common"
 import { ExagesService } from "./exages.service";
 import { Exage } from "./exage.entity";
 
-@Controller("/exages")
+@Controller("exchanges")
 export class ExagesController {
   constructor(private readonly exagesService: ExagesService) {}
 
@@ -10,6 +10,8 @@ export class ExagesController {
   async getAll(): Promise<Exage[]> {
     return this.exagesService.findAll();
   }
+
+
 
   @Get(":id")
   async getById(@Param("id") id: number): Promise<Exage | null> {
