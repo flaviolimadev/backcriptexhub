@@ -1,0 +1,122 @@
+[
+  {
+    "name": "CATSUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/33323.png",
+    "description": "Par de negociação CATS/USDT para arbitragem"
+  },
+  {
+    "name": "DEEPUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/33391.png",
+    "description": "Par de negociação DEEP/USDT para arbitragem"
+  },
+  {
+    "name": "CTAUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/31185.png",
+    "description": "Par de negociação CTA/USDT para arbitragem"
+  },
+  {
+    "name": "OVRUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/8144.png",
+    "description": "Par de negociação OVR/USDT para arbitragem"
+  },
+  {
+    "name": "BRISEUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/11079.png",
+    "description": "Par de negociação BRISE/USDT para arbitragem"
+  },
+  {
+    "name": "BTCUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/1.png",
+    "description": "Par de negociação BTC/USDT para arbitragem"
+  },
+  {
+    "name": "ETHUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/1027.png",
+    "description": "Par de negociação ETH/USDT para arbitragem"
+  },
+  {
+    "name": "BNBUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/1839.png",
+    "description": "Par de negociação BNB/USDT para arbitragem"
+  },
+  {
+    "name": "ADAUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/2010.png",
+    "description": "Par de negociação ADA/USDT para arbitragem"
+  },
+  {
+    "name": "SOLUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/5426.png",
+    "description": "Par de negociação SOL/USDT para arbitragem"
+  },
+  {
+    "name": "XRPUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/52.png",
+    "description": "Par de negociação XRP/USDT para arbitragem"
+  },
+  {
+    "name": "DOTUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/6636.png",
+    "description": "Par de negociação DOT/USDT para arbitragem"
+  },
+  {
+    "name": "AVAXUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/5805.png",
+    "description": "Par de negociação AVAX/USDT para arbitragem"
+  },
+  {
+    "name": "LINKUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/1975.png",
+    "description": "Par de negociação LINK/USDT para arbitragem"
+  },
+  {
+    "name": "MATICUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/3890.png",
+    "description": "Par de negociação MATIC/USDT para arbitragem"
+  },
+  {
+    "name": "LTCUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/2.png",
+    "description": "Par de negociação LTC/USDT para arbitragem"
+  },
+  {
+    "name": "UNIUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/7083.png",
+    "description": "Par de negociação UNI/USDT para arbitragem"
+  },
+  {
+    "name": "ATOMUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/3794.png",
+    "description": "Par de negociação ATOM/USDT para arbitragem"
+  },
+  {
+    "name": "FILUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/2280.png",
+    "description": "Par de negociação FIL/USDT para arbitragem"
+  },
+  {
+    "name": "TRXUSDT",
+    "status": 1,
+    "avatar": "https://s3.arbitragescanner.io/w/coin/1958.png",
+    "description": "Par de negociação TRX/USDT para arbitragem"
+  }
+]

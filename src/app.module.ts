@@ -21,7 +21,7 @@ import { AcoesComentarioModule } from './acoes_comentario/acoes_comentario.modul
   imports: [
     TypeOrmModule.forRoot({
       type: 'postgres',
-      url: 'postgresql://banco_criptexv3_user:HV66F2rCmG2gYJxrti1xEOCPTzXsaTgc@dpg-cv5kt7t2ng1s73dfqssg-a.oregon-postgres.render.com/banco_criptexv3',
+      url: 'postgresql://criptexhub_user:PDhAK3ovOUBNBBhcau3LcAxIIcK6zLsf@dpg-d1v665ali9vc73bdc1t0-a.oregon-postgres.render.com/criptexhub',
       autoLoadEntities: true,
       synchronize: true,
       ssl: {
